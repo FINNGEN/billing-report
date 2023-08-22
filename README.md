@@ -3,8 +3,8 @@
 Script for generating monthy billing report for the FIMM projects. Script reads metadata file from the google cloud storage bucket and extracts cost records from the BQ table for a given project by label (WBS). Metadata is a tab-separated CSV file with two columns, `label` (i.e. WBS) and `description`:
 ```
 label	description
-111111	SANDBOX_PROJECT_1
-222222	SANDBOX_PROJECT_2
+111111	Some description about the project 1
+222222	Some description about the project 2
 ```
 
 ## Run the script
