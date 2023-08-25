@@ -17,8 +17,11 @@ log = logging.getLogger()
 
 warnings.filterwarnings('ignore')
 
-def summarize_results(qdf, label = 'gcp'):
+def summarize_results(qdf):
     '''Summarize result from the BQ query dataframe'''
+    
+    qdf['wbs'] = qdf['label'].apply(lambda x: x.split('_')[0])
+    wbs = ','.join(list(set(qdf['wbs'])))
     
     # calculate costs
     cost = qdf['cost'].sum()
@@ -27,16 +30,18 @@ def summarize_results(qdf, label = 'gcp'):
     credits = qdf.loc[qdf['credits'].apply(lambda x: len(x) > 0)]
     discounts = [sum([el['amount'] for el in row]) for row in credits['credits']]
     discount = sum(discounts)
+
+    total_cost = cost + discount
     
     pid = ','.join(set(list(qdf['id'])))
     pname = ','.join(set(list(qdf['name'])))
-    total_cost = cost + discount
     billing_id = ','.join(set(list(qdf['label'])))
     description = ','.join(set(list(qdf['description'])))
     
     # keys and values
     res = {
-        'label (wbs)': billing_id,
+        'bq billing label': billing_id,
+        'wbs': wbs,
         'description': description,
         'BQ entries found for a given time frame': True,
         'project_id': pid,
@@ -54,13 +59,16 @@ def calculate(df, by='name'):
         grouped = df.groupby(df[by])
         for p in grouped.groups.keys():
             d = grouped.get_group(p)
-            r = summarize_results(d, label = by) 
+            r = summarize_results(d) 
             res.append(r)
-
+    
     return res
 
 def run_query(query, client, label, description, invoice_month, dry_run=False):
     '''Run BQ query and return query result as dataframe, data billed / data read in GB'''
+
+    wbs = label.split('_')[0]
+    
     if (dry_run):
         job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
         q = client.query(query, job_config=job_config)
@@ -76,6 +84,7 @@ def run_query(query, client, label, description, invoice_month, dry_run=False):
 
         # add project labels and description
         df['label'] = label
+        df['wbs'] = wbs
         df['description'] = description
         
         # filter by invoice month
@@ -84,12 +93,13 @@ def run_query(query, client, label, description, invoice_month, dry_run=False):
 
         # calculate costs per WBS and per GCP project
         summary_proj = calculate(df, by='name')
-        summary_wbs = calculate(df, by='label')
+        summary_wbs = calculate(df, by='wbs')
 
         # if no data was extracted
         if len(summary_proj) == 0 and len(summary_wbs) == 0:
             empty_record = {
-                'label (wbs)': label,
+                'bq billing label': label,
+                'wbs': wbs,
                 'description': description,
                 'BQ entries found for a given time frame': False,
                 'project_id': pd.NA,
@@ -111,7 +121,7 @@ def get_metadata(bucket_name, fname):
     blob = bucket.get_blob(fname)
     data = blob.download_as_string()
     dat = pd.read_csv(io.StringIO(data.decode()), sep='\t')
-    # log.info(dat)
+
     return dat
 
 def get_month_last_day(year, month):
@@ -120,6 +130,7 @@ def get_month_last_day(year, month):
     days = [d for w in cal for d in w  if d != 0]
     days.reverse()
     end = days[0]
+
     return end
 
 def get_query(table_name, start_date, end_date, label):
@@ -163,7 +174,7 @@ def save_df(dat, label, invoice_month, dirout):
     fout = f'{dirout}/billing.label.{label}.{invoice_month}.csv'
     if dat is not None:
         dat.to_csv(fout, sep=',', index=False)
-        
+
 
 def main():
 
@@ -235,7 +246,7 @@ def main():
     log.info(f"\nExtracting records from {start_date} to {end_date}")
 
     # go thruogh metadata entries
-    rows_wbs = []
+    rows_label = []
     rows_proj = []
     total_bytes_billed = 0
     total_bytes_processed = 0
@@ -272,22 +283,44 @@ def main():
             save_df(dat, billing_label, invoice_month, dirout)
         
         # append extracted values to the final report
-        rows_wbs = rows_wbs + wbs
         rows_proj = rows_proj + proj
+        rows_label = rows_label + wbs
 
-    total_cost_wbs = sum([i['total_cost'] for i in rows_wbs])
-    total_cost_proj = sum([i['total_cost'] for i in rows_proj])
+    # second round of summary
+    dpr = pd.DataFrame(rows_proj)
+    dlab = pd.DataFrame(rows_label)
     
-    rows_wbs.append({'TOTAL COST SUM': total_cost_wbs})
-    rows_proj.append({'TOTAL COST SUM': total_cost_proj})
- 
     if not dry_run:
+
+        # total costs
+        tot_proj = dpr['total_cost'].sum()
+        tot_wbs = dlab['total_cost'].sum()
+    
+        # aggregate by wbs
+        dwbs = pd.concat([
+            dlab[['wbs', 'bq billing label', 'description']].groupby('wbs').agg(lambda x: ', '.join(set(list(x)))),
+            dlab[['wbs', 'cost', 'discount', 'total_cost']].groupby('wbs').sum()
+        ], axis = 1)
+
+        # re-order columns
+        dwbs['wbs'] = dwbs.index
+        cols_ord = ['wbs', 'bq billing label', 'description', 'cost', 'discount', 'total_cost']
+        dwbs = dwbs[cols_ord]
+
+        # add total sums
+        dpr = pd.concat([dpr, pd.DataFrame({'TOTAL COST SUM': tot_proj}, index = [0])], ignore_index=True)
+        dwbs = pd.concat([dwbs, pd.DataFrame({'TOTAL COST SUM': tot_wbs}, index = [0])], ignore_index=True)
+            
         fout = f"{dirout}/report_{invoice_month}.xlsx"
 
         with pd.ExcelWriter(fout) as writer:
-            pd.DataFrame(rows_proj).to_excel(writer, sheet_name="by GCP project", index=False)
-            pd.DataFrame(rows_wbs).to_excel(writer, sheet_name="by WBS", index=False)
+            dpr.to_excel(writer, sheet_name="by GCP project", index=False)
+            dwbs.to_excel(writer, sheet_name="by WBS", index=False)
             log.info(f'\nSaved report to {fout}')
+    
+    else:
+        tot_proj = pd.NA
+        tot_wbs = pd.NA
     
     log.info('\n' + ('').center(50, '='))
     log.info('SCANNING OF THE MONTH IS COMPLETED')
@@ -300,8 +333,8 @@ def main():
     total_processed_cost = total_processed_tb * 5
     total_billed_cost = float(total_billed_tb) * 5
     
-    log.info(f'\n{"Total costs (GCP projects):".ljust(chars)}{total_cost_proj}')
-    log.info(f'{"Total costs (WBS):".ljust(chars)}{total_cost_wbs}')
+    log.info(f'\n{"Total costs (GCP projects):".ljust(chars)}{tot_proj}')
+    log.info(f'{"Total costs (WBS):".ljust(chars)}{tot_wbs}')
     log.info(f'\n{"(BQ) Total data processed:".ljust(chars)}{total_processed_gb} GB')
     log.info(f'{"(BQ) Total data billed:".ljust(chars)}{total_billed_gb} GB')
     log.info(f'{"(BQ) Estimated compute cost of queries:".ljust(chars)}{total_processed_cost} $')
