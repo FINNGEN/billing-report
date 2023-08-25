@@ -53,6 +53,9 @@ def summarize_results(qdf):
     
     return res
 
+def unique_list(l):
+    return list(dict.fromkeys(l))
+
 def calculate(df, by='name'):
     res = []
     if df.shape[0] > 0:
@@ -298,7 +301,7 @@ def main():
     
         # aggregate by wbs
         dwbs = pd.concat([
-            dlab[['wbs', 'bq billing label', 'description']].groupby('wbs').agg(lambda x: ', '.join(set(list(x)))),
+            dlab[['wbs', 'bq billing label', 'description']].groupby('wbs').agg(lambda x: ', '.join(unique_list(list(x)))),
             dlab[['wbs', 'cost', 'discount', 'total_cost']].groupby('wbs').sum()
         ], axis = 1)
 
