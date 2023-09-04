@@ -24,7 +24,7 @@ warnings.filterwarnings('ignore')
 NCHARS = 40
 
 
-def calculate_costs_and_discounts(qdf):
+def calculate_costs_and_discounts(qdf, error_label=''):
     '''Calculate cost and discount from the BQ query dataframe'''
     
     # calculate costs
@@ -41,7 +41,7 @@ def calculate_costs_and_discounts(qdf):
     d = {a: list(set(qdf[a]))[0] for a in attr} 
     for a in attr:
         assert len(set(qdf[a])) == 1, f"\tERROR when aggregating by PROJECT_ID " + \
-            f"{pid} - label {a} assertion error :: not unique value - {set(qdf[a])}"
+            f"{pid} in {error_label} - label {a} assertion error :: not unique value - {set(qdf[a])}"
     
     # keys and values
     res = {
@@ -84,7 +84,7 @@ def aggregate_by_project(df, key, value):
         for p in grouped.groups.keys():
             d = grouped.get_group(p)                
             try:
-                r = calculate_costs_and_discounts(d)
+                r = calculate_costs_and_discounts(d, value)
             except AssertionError as e:
                 log.error(e)
                 pid_error.append({
@@ -243,6 +243,7 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
         f.write(f"{date_or_billing_lab}\t{processed}\t{billed}\n")
     
     # unnest billing label and aggreagate data by project_id
+    pid_error = []
     if df is not None:
         if len(df) > 0:
             res = unnest_labels(df)
