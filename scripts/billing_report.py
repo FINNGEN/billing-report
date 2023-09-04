@@ -2,26 +2,30 @@
 # -*- coding: utf-8 -*-
 
 import io
+import os
 import sys
 import logging
 import warnings
 import argparse
 import calendar
+import datetime
+import tempfile
 import pandas as pd
-from datetime import datetime
+import multiprocessing
+from multiprocessing import Pool
 from google.cloud import storage
 from google.cloud import bigquery
+from datetime import date, timedelta
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 log = logging.getLogger()
 
 warnings.filterwarnings('ignore')
+NCHARS = 40
 
-def summarize_results(qdf):
-    '''Summarize result from the BQ query dataframe'''
-    
-    qdf['wbs'] = qdf['label'].apply(lambda x: x.split('_')[0])
-    wbs = ','.join(list(set(qdf['wbs'])))
+
+def calculate_costs_and_discounts(qdf):
+    '''Calculate cost and discount from the BQ query dataframe'''
     
     # calculate costs
     cost = qdf['cost'].sum()
@@ -30,22 +34,21 @@ def summarize_results(qdf):
     credits = qdf.loc[qdf['credits'].apply(lambda x: len(x) > 0)]
     discounts = [sum([el['amount'] for el in row]) for row in credits['credits']]
     discount = sum(discounts)
-
     total_cost = cost + discount
+    pid = list(set(qdf['id']))[0]
     
-    pid = ','.join(set(list(qdf['id'])))
-    pname = ','.join(set(list(qdf['name'])))
-    billing_id = ','.join(set(list(qdf['label'])))
-    description = ','.join(set(list(qdf['description'])))
+    attr = ['name', 'id', 'billing_label', 'wbs']
+    d = {a: list(set(qdf[a]))[0] for a in attr} 
+    for a in attr:
+        assert len(set(qdf[a])) == 1, f"\tERROR when aggregating by PROJECT_ID " + \
+            f"{pid} - label {a} assertion error :: not unique value - {set(qdf[a])}"
     
     # keys and values
     res = {
-        'bq billing label': billing_id,
-        'wbs': wbs,
-        'description': description,
-        'BQ entries found for a given time frame': True,
-        'project_id': pid,
-        'project_name': pname,
+        'project_id': d['id'],
+        'project_name': d['name'],
+        'billing_label': d['billing_label'], 
+        'wbs': d['wbs'],
         'cost': cost,
         'discount': discount,
         'total_cost': total_cost
@@ -53,98 +56,89 @@ def summarize_results(qdf):
     
     return res
 
-def unique_list(l):
-    return list(dict.fromkeys(l))
-
-def calculate(df, by='name'):
-    res = []
-    if df.shape[0] > 0:
-        grouped = df.groupby(df[by])
-        for p in grouped.groups.keys():
-            d = grouped.get_group(p)
-            r = summarize_results(d) 
-            res.append(r)
+def unnest_labels(df):
+    ''' Unnest labels extracted from the bq billing table'''
     
-    return res
+    labels = df['labels']
+    billing_labs = []
+    for i in range(labels.shape[0]):
+        row = labels.iloc[i]
+        lab = ""
+        for l in row:
+            item = f"{l['key']}_{l['value']}"
+            if l['key'] == 'billing':
+                lab = item  
+        billing_labs.append(lab)
+    
+    df['billing_label'] = billing_labs
+    df['wbs'] = df['billing_label'].apply(lambda x: x.split('_')[1] if x != '' in x else '')
+    
+    return df
 
-def run_query(query, client, label, description, invoice_month, dry_run=False):
-    '''Run BQ query and return query result as dataframe, data billed / data read in GB'''
+def aggregate_by_project(df, key, value):
+    '''Aggregate biiling data in the data frame'''
+    res = []
+    pid_error = []
+    if df.shape[0] > 0:
+        grouped = df.groupby(df['id'])
+        for p in grouped.groups.keys():
+            d = grouped.get_group(p)                
+            try:
+                r = calculate_costs_and_discounts(d)
+            except AssertionError as e:
+                log.error(e)
+                pid_error.append({
+                    'project_id': p, 
+                    'billing_label': ';'.join(list(set(d['billing_label']))),
+                    'wbs': ';'.join(list(set(d['wbs']))),
+                    'value': value, 
+                    'action': 'excluded project_id/billing_label/wbs from the report', 
+                    'error': e
+                })
+            else:
+                r[key] = value
+                res.append(r)
+    return res, pid_error
 
-    wbs = label.split('_')[0]
+def run_query(date_or_billing_lab, query, client, invoice_month, dry_run=False):
+    '''Run BQ query and return query result as dataframe, data billed / data read in GB (term - either date or a billing label)'''
     
     if (dry_run):
         job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
         q = client.query(query, job_config=job_config)
-        
-        # return empty values
         df = None
-        summary_proj = []
-        summary_wbs = []
-   
     else:
         q = client.query(query)
         df = q.to_dataframe()
-
-        # add project labels and description
-        df['label'] = label
-        df['wbs'] = wbs
-        df['description'] = description
         
         # filter by invoice month
         ids = df['invoice'].apply(lambda x: x['month'] == invoice_month)
         df = df[ids]
-
-        # calculate costs per WBS and per GCP project
-        summary_proj = calculate(df, by='name')
-        summary_wbs = calculate(df, by='wbs')
-
-        # if no data was extracted
-        if len(summary_proj) == 0 and len(summary_wbs) == 0:
-            empty_record = {
-                'bq billing label': label,
-                'wbs': wbs,
-                'description': description,
-                'BQ entries found for a given time frame': False,
-                'project_id': pd.NA,
-                'project_name': pd.NA,
-                'cost': 0,
-                'discount': 0,
-                'total_cost': 0
-            }
-            summary_proj = summary_wbs = [empty_record]
-        
-    log.info(f"\t\tTOTAL BYTES BILLED FOR THE QUERY: {q.total_bytes_billed} ({q.total_bytes_billed * 1e-09} GB)")
+        if len(df) > 0:
+            df = df.reset_index(drop=True) 
     
-    return summary_proj, summary_wbs, q.total_bytes_billed, q.total_bytes_processed, df
-
-def get_metadata(bucket_name, fname):
-    '''Get metadata file from the GCS bucket'''
-    client_gsc = storage.Client()
-    bucket = client_gsc.get_bucket(bucket_name)
-    blob = bucket.get_blob(fname)
-    data = blob.download_as_string()
-    dat = pd.read_csv(io.StringIO(data.decode()), sep='\t')
-
-    return dat
+    b = q.total_bytes_billed
+    p = q.total_bytes_processed
+    
+    log.info(f"[BQ] {date_or_billing_lab} - total bytes billed {b} ({round(b * 1e-09, 4)} GB) / processed: {p} ({round(p * 1e-09, 4)} GB)")
+    
+    return b, p, df
 
 def get_month_last_day(year, month):
     '''Get last day of the given month in a given year'''
+    
     cal = calendar.monthcalendar(year, month)
     days = [d for w in cal for d in w  if d != 0]
     days.reverse()
     end = days[0]
-
+    
     return end
 
-def get_query(table_name, start_date, end_date, label):
+def get_query_billing_label(table_name, start_date, end_date, label):
     '''
-    Get cost and discount queries given 
-    - BQ table name
-    - Start date
-    - End date
-    - Project label
+    Get cost and discount queries given: BQ table name, start/end dates, billing label
     '''
-
+    
     query = """
     SELECT project.name,
     project.id,
@@ -160,7 +154,24 @@ def get_query(table_name, start_date, end_date, label):
     (project_labels.key = 'billing') AND
     (project_labels.value = '%s')) 
     """ % (table_name, start_date, end_date, label)
+    
+    return query
 
+def get_query(table_name, qdate):
+    ''' Get cost and discount queries given: BQ table name, Star/End dates '''
+    
+    query = """
+    SELECT project.name,
+    project.id,
+    project.labels,
+    cost,
+    credits,
+    invoice
+    FROM `%s`
+    WHERE
+    (_PARTITIONDATE = '%s') 
+    """ % (table_name, qdate)
+    
     return query
 
 def str2bool(v):
@@ -173,176 +184,400 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
-def save_df(dat, label, invoice_month, dirout):
-    fout = f'{dirout}/billing.label.{label}.{invoice_month}.csv'
-    if dat is not None:
-        dat.to_csv(fout, sep=',', index=False)
-
-
-def main():
-
-    # parse the arguments
-    parser = argparse.ArgumentParser(description='Script prepares billing report.')
-
-    # parameters used for modules and runs specifications
-    parser.add_argument('-p', '--project', help='PROJECT ID in which BQ billing table is stored.', required=True)
-    parser.add_argument('-d', '--dataset', help='BigQuery dataset name (e.g. fimm_billing_data).', required=True)
-    parser.add_argument('-t', '--table', help='BigQuery table name (e.g. gcp_billing_export_v1_015819_A39FE2_F94565).', required=True)
-    parser.add_argument('-md', '--metadata', help='Metadata file storing project labels and description.', required=True)
-    parser.add_argument('-b', '--bucket', help='Extract metadata from the given bucket omiting gs:// prefix.', required=True)
-    parser.add_argument('-y', '--year', help='Extract records for a given year.', required=True)
-    parser.add_argument('-m', '--month', help='Extract records for a given month (number)', required=True)
-    parser.add_argument('-dry', '--dry-run', 
-                        default=True, required=False, type=str2bool,
-                        help="Run queries in the DRY_RUN mode, i.e. no actual queries are executed. Used for estimating costs of sql queries")
-    parser.add_argument('-o', '--dirout', required=False, help="Path to output file for saving report - not required if running with `--dry-run True`.")
-    parser.add_argument('-s', '--save', default=False, required=False, type=str2bool,
-                        help="Save the extracted data frame to a separate CSV file.")
-
-    # initialise variables
-    args = vars(parser.parse_args())
-    project_id = args['project']
-    dataset_id = args['dataset']
-    table_id = args['table']
-    bucket_name = args['bucket']
-    metadata_fname = args['metadata']
-    year = int(args['year'])
-    month = int(args['month'])
-    dirout = args['dirout']
-    dry_run = str2bool(args['dry_run'])
-    chars = 40
-
-    if dry_run:
-        log.info('\nActivated dry run - NO SLQ queries will be executed')
+def get_dates(year, month):
+    '''Get dates in a month with 1 day overlap from prev/next months'''
     
-    if not dry_run and dirout is None:
-        log.error(f'\nPlease, provide output directory when running with `--dry-run False` option!\n')
-        sys.exit()
+    start_day = get_month_last_day(year, month - 1)
+    start_dt = date(year, month-1, start_day)
+    end_dt = date(year, month+1, 1)
+    delta = timedelta(days=1)
+    
+    # store the dates between two dates in a list
+    dates = []
+    
+    while start_dt <= end_dt:
+        # add current date to list by converting  it to iso format
+        dates.append(start_dt.isoformat())
+        
+        # increment start date by timedelta
+        start_dt += delta
+    
+    return dates
+
+def multiproc_wrapper(args):
+    ''' Multiproc wrapper function '''
+    try:
+        res = process_query(*args)
+    except Exception as e:
+        log.error(f'ERROR while processing batch {args[0]}: {e}')
+        return None
+    else:
+        return res
+
+def save_df(lst, qdate, dirout):
+    '''Save date report'''
+    cols = [lst[i].keys() for i,e in enumerate(lst) if len(lst[i]) > 0][0]
+    df = pd.DataFrame.from_records(lst, columns=cols)
+    
+    fout = os.path.join(dirout, f'{qdate}.csv')
+    if df is not None:
+        df.to_csv(fout, sep='\t', index=False)
+
+def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name, 
+                  invoice_month, project_id, dry_run, tmpfile, dir=''):
+    '''Process single date query to extract labeled/unlabeled/wbs sums'''
+    
+    s = datetime.datetime.now()
+    log.info(f"Batch {i}: Start processing {date_or_billing_lab}" )
+    
+    # get client
+    client = bigquery.Client(project=project_id)
+    
+    # fetch data from the BQ
+    billed, processed, df = run_query(
+        date_or_billing_lab, query, client, invoice_month, dry_run
+    )
+    
+    # append the line to the report
+    with open(tmpfile, 'a') as f:
+        f.write(f"{date_or_billing_lab}\t{processed}\t{billed}\n")
+    
+    # unnest billing label and aggreagate data by project_id
+    if df is not None:
+        if len(df) > 0:
+            res = unnest_labels(df)
+            aggr, pid_error = aggregate_by_project(
+                res, 
+                date_or_billing_lab_name, 
+                date_or_billing_lab
+            )
+            save_df(aggr, date_or_billing_lab, dir)
+        
+    e = datetime.datetime.now()
+    log.info(f"Batch {i}: Date {date_or_billing_lab} " + \
+             f"proccessed in {round((e - s).seconds / 60, 2)} mins" )
+    
+    return pid_error
+
+def create_tmp_dir(dirout, invoice_month):
+    ts = datetime.datetime.now().strftime("%d%m%YT%H%M%S")
+    tmp = os.path.join(dirout, f"invoice{invoice_month}_ts_{ts}")
+    if not os.path.exists(tmp):
+        os.makedirs(tmp) 
+    return tmp
+
+def summarize_costs(l, labels = ['GCP projects', 'Billing Label', 'WBS']):
+    '''Summarize costs per each label'''
+    log.info("\nTotals:")
+    for i in range(len(l)):
+        by = labels[i]
+        tot = l[i]['total'][l[i]['total'] != ''].iloc[0]
+        log.info(f'\t{f"Total costs ({by}):".ljust(NCHARS)}{tot}')
+
+def summarize_bq_costs(summary_file):
     
     log.info('\n' + ('').center(50, '='))
-    log.info("STARTING BILLING REPORT PREPARATION")
-
-    # initialize and bq table name and bucket name
-    t_name = f"{project_id}.{dataset_id}.{table_id}"
-    if bucket_name.startswith('gs://'):
-        bucket_name = bucket_name.replace('gs://', '')
+    log.info('SCANNING IS COMPLETED')
     
-    # init bq client
-    client_bq = bigquery.Client(project=project_id)
+    # read file with collected costs
+    x = pd.read_csv(summary_file, sep="\t", header=0)
+    
+    total_processed_gb = round(sum(x['BQ_PROCESSED_BYTES']) * 1e-9, 2)
+    total_billed_gb = round(sum(x['BQ_BILLED_BYTES']) * 1e-9, 2)
+    total_processed_tb = sum(x['BQ_PROCESSED_BYTES']) * 1e-12
+    total_billed_tb = sum(x['BQ_BILLED_BYTES']) * 1e-12
+    
+    total_processed_cost = total_processed_tb * 5
+    total_billed_cost = float(total_billed_tb) * 5
+    
+    log.info(f'\n{"(BQ) Total data processed:".ljust(NCHARS)}{total_processed_gb} GB')
+    log.info(f'{"(BQ) Total data billed:".ljust(NCHARS)}{total_billed_gb} GB')
+    log.info(f'{"(BQ) Estimated compute cost of queries:".ljust(NCHARS)}{total_processed_cost} $')
+    log.info(f'{"(BQ) Billed compute cost of queries:".ljust(NCHARS)}{total_billed_cost} $\n')
 
-    # read metadata from the bucket
+def unique_list(l):
+    '''Get unique elements in array preserving the order'''
+    return list(dict.fromkeys(l))
+
+def aggregate_by_attribute(df, by = 'project_id', drop_cols=[]):
+    '''Aggreagate data across dates'''
+    
+    df = df.fillna('')
+    cols_calc = list(df.columns[df.dtypes == 'float64'])
+    cols_summarize = list(set(df.columns).difference(set(cols_calc)))
+    cols_calc.append(by)
+    
+    res = pd.concat([
+        df[cols_summarize].groupby(by).agg(lambda x: ';'.join(unique_list(list(x)))),
+        df[cols_calc].groupby(by).sum()
+    ], axis = 1)
+    
+    # re-order and drop index
+    order = ['project_id', 'project_name', 'description', 'billing_label', 'wbs']
+    cols_order = order + list(set(res.columns).difference(set(order)))                 
+    cols = unique_list([by] + cols_order)
+    res[by] = res.index
+    res = res.reset_index(drop=True)
+    res = res[cols]
+    if len(drop_cols) > 0:
+        try:
+            res = res.drop(columns = drop_cols)
+        except KeyError as _:
+            pass 
+    
+    return res
+
+def exclude_umbigous_records(df, edf):
+    '''Exclude umbigous records (e.g. one project id and multiple labels) before summarizing final costs'''
+    
+    # colnames
+    bl = 'billing_label'
+    pid = 'project_id'
+    wbs = 'wbs'
+    sep = '\n\t- '
+    
+    # exclude projects with umbigous multiple lables in wbs/billing label
+    # in addition, drop the whole billing label/wbs
+    ex_projects = unique_list(edf[pid])    
+    
+    bildup = edf[bl].duplicated()
+    ex_billing_labs = flatten(edf[bl][~bildup].apply(lambda x: x.split(';')).values)
+    
+    wbsdup = edf[wbs].duplicated()
+    ex_wbs = flatten(edf[wbs][~wbsdup].apply(lambda x: x.split(';') ).values)
+    
+    lw = "(labels: '" + edf[bl] + "' wbs: '" + edf[wbs]+ "')"
+    erlist = sep + sep.join(edf[pid] + lw)
+    log.error(f"\n{len(edf)} projects with multiple billing " +
+        f"labels - exclude project(s) from the report: {erlist}")
+    
+    # remove rows with pid/billing lab/wbs fror error list
+    ids = df.apply(
+        lambda x: x.loc[pid] in ex_projects or x.loc[wbs] in ex_wbs \
+            or x.loc[bl] in ex_billing_labs, axis=1)
+    df_filt = df[~ids]
+    df_filt = df_filt.reset_index(drop=True)
+    
+    return df_filt
+
+
+def combine_dates(tmpdir, metadata, err_df):
+    '''Read files per date, combine and aggregate data per project/billing label/wbs'''
+    
+    # list all files created in the tmp folder
+    files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir)]
+    
+    # combine
+    l = []
+    log.info("\nStarting to combine data across the dates.")
+    for f in files:
+        x = pd.read_csv(f, sep='\t', header=0,
+                        dtype={'wbs': 'string','billing_label': 'string'})
+        log.info(f"Reading aggregated data for the date " + \
+                 f"{os.path.basename(f).split('.')[0]} - " + \
+                    f"read {x.shape[0]} records.")
+        l.append(x)
+    
+    combined = pd.concat(l)
+    combined = combined.fillna('')
+    
+    # if projects with errors were observed, exclude them altogether
+    if len(err_df) > 0:
+        combined = exclude_umbigous_records(combined, err_df)
+    
+    # match the description
+    metadata = md.copy()
+    if 'description' not in combined.columns:
+        metadata['billing_label'] = 'billing_' + metadata['label']
+        metadata.index = metadata['billing_label']
+        
+        d = list(set(combined['billing_label']).difference(
+            set(metadata['billing_label'])))
+        v = [pd.NA] * len(d)    
+        add = pd.DataFrame(list(zip(v, v, d)), 
+                           columns = metadata.columns, 
+                           index=d)
+        
+        metadata = pd.concat([metadata, add])
+        combined['description'] = metadata.loc[
+            combined['billing_label']
+        ]['description'].values
+    
+    # aggregate per attribute
+    pr = aggregate_by_attribute(
+        combined, by = 'project_id', drop_cols=['date']
+    )
+    lab = aggregate_by_attribute(
+        combined, by = 'billing_label', drop_cols=['date']
+    )
+    wbs = aggregate_by_attribute(
+        combined, by = 'wbs', drop_cols=['date']
+    )
+    
+    # append total to project
+    res = []
+    for t in [pr, lab, wbs]:
+        t['total'] = [''] * len(t)
+        t['total'][len(t)-1] = t['total_cost'].sum()
+        res.append(t)
+    
+    return res
+
+def save_excel(df_list, df_errors, invoice_month, dirout, mode):
+    ''' Save dataframes to the excel file'''
+    
+    fname = f"report_{invoice_month}_{mode}.xlsx"
+    fout = os.path.join(dirout, fname)
+    with pd.ExcelWriter(fout) as writer:
+        df_list[0].to_excel(writer, sheet_name="by GCP project", index=False)
+        df_list[1].to_excel(writer, sheet_name="by billing label", index=False)
+        df_list[2].to_excel(writer, sheet_name="by WBS", index=False)
+        df_errors.to_excel(writer, sheet_name="errors", index=False)
+        log.info(f'\nSaved report to {fout}')
+
+def flatten(l):
+    flat_list = [item for sublist in l for item in sublist]
+    return flat_list
+
+def get_metadata(bucket_name, m_filename):
+    '''Get metadata file from the GCS bucket'''
+    
     try:    
-        m = get_metadata(bucket_name, metadata_fname)
+        client_gsc = storage.Client()
+        bucket = client_gsc.get_bucket(bucket_name)
+        blob = bucket.get_blob(m_filename)
+        data = blob.download_as_string()
+        dat = pd.read_csv(io.StringIO(data.decode()), sep='\t')
+    
     except Exception as e:
         log.error(f'Error ocurred while fetching the metadata : {e}')
         sys.exit()
     else:
         log.info('Succesfully read metadata file')
+        return dat
 
-    # get formatted start and end dates
-    start_day = get_month_last_day(year, month - 1)
-    invoice_month = f'{year}{month:02d}'
+def parse_args():
+    ''' Parse arguments '''
 
-    # format start and end dates
-    start_date = f'{year}-{(month - 1):02d}-{start_day:02d}'
-    end_date = f'{year}-{(month + 1):02d}-01'
-    log.info(f"\nExtracting records from {start_date} to {end_date}")
+    parser = argparse.ArgumentParser(
+        description=('Script prepares monthly billing report.'),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
 
-    # go thruogh metadata entries
-    rows_label = []
-    rows_proj = []
-    total_bytes_billed = 0
-    total_bytes_processed = 0
-    for i in range(m.shape[0]):
-        billing_label = m.iloc[i]['label']
-        description = m.iloc[i]['description']
-        log.info(f"\tExtracting costs for the project: {m.iloc[i]['description']}, {billing_label}")
+    parser.add_argument('--p', '--project', dest='project_id', required=True,
+                        help='PROJECT ID in which BQ billing table is stored.')
 
-        # prepare bq queries based on project id
-        query = get_query(
-            t_name, start_date, end_date, billing_label
-        )
-
-        # calculate costs for the specified period of time
-        try:
-            proj, wbs, bytes_billed, bytes_processed, dat = run_query(
-                query, 
-                client_bq,
-                label = billing_label, 
-                description = description,
-                invoice_month = invoice_month,
-                dry_run = dry_run
-            )
-        except Exception as e:
-            log.info(f"Something went wrong while extracting costs for \
-                     the project with label {billing_label} :: {e}")
-            proj, wbs, bytes_billed, bytes_processed, dat = [], [], 0, 0, None
-
-        total_bytes_billed += bytes_billed
-        total_bytes_processed += bytes_processed
-
-        # save table if specified 
-        if args['save']:
-            save_df(dat, billing_label, invoice_month, dirout)
+    parser.add_argument('-d', '--dataset', dest='dataset_id', required=True,
+                        help='BigQuery dataset name (e.g. fimm_billing_data).')
+    
+    parser.add_argument('-t', '--table', dest='table_id', required=True,
+                        help='BigQuery table name (e.g. gcp_billing_export_v1_015819_A39FE2_F94565).')
         
-        # append extracted values to the final report
-        rows_proj = rows_proj + proj
-        rows_label = rows_label + wbs
-
-    # second round of summary
-    dpr = pd.DataFrame(rows_proj)
-    dlab = pd.DataFrame(rows_label)
+    parser.add_argument('-y', '--year', dest='year', required=True,type=int,
+                        help='Extract records for a given year.')
     
-    if not dry_run:
+    parser.add_argument('-m', '--month', dest='month', required=True, type=int,
+                        help='Extract records for a given month (number)')
 
-        # total costs
-        tot_proj = dpr['total_cost'].sum()
-        tot_wbs = dlab['total_cost'].sum()
+    parser.add_argument('-o', '--dirout', dest='dirout', required=False, 
+                        default=os.getcwd(),
+                        help="Path to output file for saving report - not required if running with `--dry-run True`.")
     
-        # aggregate by wbs
-        dwbs = pd.concat([
-            dlab[['wbs', 'bq billing label', 'description']].groupby('wbs').agg(lambda x: ', '.join(unique_list(list(x)))),
-            dlab[['wbs', 'cost', 'discount', 'total_cost']].groupby('wbs').sum()
-        ], axis = 1)
-
-        # re-order columns
-        dwbs['wbs'] = dwbs.index
-        cols_ord = ['wbs', 'bq billing label', 'description', 'cost', 'discount', 'total_cost']
-        dwbs = dwbs[cols_ord]
-
-        # add total sums
-        dpr = pd.concat([dpr, pd.DataFrame({'TOTAL COST SUM': tot_proj}, index = [0])], ignore_index=True)
-        dwbs = pd.concat([dwbs, pd.DataFrame({'TOTAL COST SUM': tot_wbs}, index = [0])], ignore_index=True)
-            
-        fout = f"{dirout}/report_{invoice_month}.xlsx"
-
-        with pd.ExcelWriter(fout) as writer:
-            dpr.to_excel(writer, sheet_name="by GCP project", index=False)
-            dwbs.to_excel(writer, sheet_name="by WBS", index=False)
-            log.info(f'\nSaved report to {fout}')
+    parser.add_argument('-dry', '--dry-run', dest='dry_run', required=False,
+                        default=True, type=str2bool,
+                        help="Run queries in the DRY_RUN mode, i.e. no actual queries are executed. Used for estimating costs of sql queries")
     
-    else:
-        tot_proj = pd.NA
-        tot_wbs = pd.NA
+    parser.add_argument('-mode', '--mode', required=True, 
+                        choices=['full', 'metadata_billing_label'], default='full',
+                        help='Choose the mode to run: full (extracts all available data from the BQ table for a given month) \
+                            or selected (extracts records for billing labels specified in the metadata file). Default: "full"')
     
-    log.info('\n' + ('').center(50, '='))
-    log.info('SCANNING OF THE MONTH IS COMPLETED')
-
-    total_processed_gb = round(total_bytes_processed * 1e-9, 2)
-    total_billed_gb = round(float(total_bytes_billed) * 1e-9, 2)
-    total_processed_tb = total_bytes_processed * 1e-12
-    total_billed_tb = float(total_bytes_billed) * 1e-12
-
-    total_processed_cost = total_processed_tb * 5
-    total_billed_cost = float(total_billed_tb) * 5
+    parser.add_argument('-md', '--metadata', required=True,
+                        help='Metadata file storing project labels and description.')
     
-    log.info(f'\n{"Total costs (GCP projects):".ljust(chars)}{tot_proj}')
-    log.info(f'{"Total costs (WBS):".ljust(chars)}{tot_wbs}')
-    log.info(f'\n{"(BQ) Total data processed:".ljust(chars)}{total_processed_gb} GB')
-    log.info(f'{"(BQ) Total data billed:".ljust(chars)}{total_billed_gb} GB')
-    log.info(f'{"(BQ) Estimated compute cost of queries:".ljust(chars)}{total_processed_cost} $')
-    log.info(f'{"(BQ) Billed compute cost of queries:".ljust(chars)}{total_billed_cost} $\n')
+    parser.add_argument('-b', '--bucket', required=True, 
+                        help='Extract metadata from the given bucket omiting gs:// prefix.')
 
-        
+    args = parser.parse_args()
+    return args
+
+
 if __name__ == '__main__':
-    main()
+
+    args = parse_args()
+    
+    start_ts = datetime.datetime.now()
+    log.info('\n' + ('').center(50, '='))
+    log.info("STARTING BILLING REPORT PREPARATION\n")
+
+    # inititalize invoice month, bq table name and bq client
+    invoice_month = f'{args.year}{args.month:02d}'
+    t_name = f"{args.project_id}.{args.dataset_id}.{args.table_id}"
+
+    # read metadata from the bucket
+    md = get_metadata(args.bucket, args.metadata)
+    
+    # create tmp dir and tmp file for storing daily data and bq costs per query
+    tmpdir = create_tmp_dir(args.dirout, invoice_month) if not args.dry_run else ''
+    tmpfile = tempfile.NamedTemporaryFile(prefix='_bqcosts_', dir=args.dirout)
+    
+    with open(tmpfile.name, 'w') as f:
+        _ = f.write(f"DATE\tBQ_PROCESSED_BYTES\tBQ_BILLED_BYTES\n")
+
+    # if full mode - generate queries to extract data for each day
+    if args.mode == 'full':
+
+        # get dates
+        dates = get_dates(args.year, args.month)
+        
+        # get queries
+        queries = [get_query(t_name, d) for d in dates]
+        
+        # get batches
+        batches = [(i, q, dates[i], 'date', invoice_month, args.project_id, 
+                    args.dry_run, tmpfile.name, tmpdir) for i, q in enumerate(queries)]
+    
+    # else generate queries to extract data per billing label
+    else:
+
+        # get start & end dates
+        prev_month_last_day = get_month_last_day(args.year, args.month - 1)
+        start = f'{args.year}-{(args.month - 1):02d}-{prev_month_last_day:02d}'
+        end = f'{args.year}-{(args.month + 1):02d}-01'        
+        
+        # get queries
+        queries = [get_query_billing_label(t_name, start, end, md['label'].iloc[i]) for i in range(md.shape[0])]
+        
+        # get batches
+        batches = [(i, q, md.iloc[i]['description'], 'description', invoice_month, 
+                    args.project_id, args.dry_run, tmpfile.name, tmpdir) for i, q in enumerate(queries)]
+    
+    batches = batches[30:33]
+    log.info(f"Prepared {len(batches)} batches to process")
+        
+    # process batches in parallel
+    cpus = multiprocessing.cpu_count()
+    with Pool(processes=cpus) as pool:
+        err = pool.map(multiproc_wrapper, batches)
+        err_df = pd.DataFrame(flatten(err))
+    
+    # aggregate data and 
+    if not args.dry_run:
+
+        # combine across the dates
+        result = combine_dates(tmpdir, md, err_df)
+
+        # save to excel
+        save_excel(result, err_df, invoice_month, args.dirout, args.mode)
+
+        # summarize costs
+        summarize_costs(result)
+    
+    # summarize BQ costs
+    summarize_bq_costs(tmpfile.name)
+
+    # print total processing time
+    dt = round((datetime.datetime.now() - start_ts).seconds/ 60, 2)
+    log.info(f"\nTotal processing time: {dt} mins")
+
+

@@ -7,20 +7,24 @@ label	description
 222222	Some description about the project 2
 ```
 
+The script creates an output EXCEL table with 4 separate sheets: 
+- 'by GCP project' - summary of costs by project_id
+- 'by billing label' - summary of costs by billing label (e.g. "<WBS_NUMBER>_<SPECIFIC_LABEL>") - if there is no label, the costs for these unlabeled projects will be calculated in the separate row of the resulted excel table
+- 'by WBS' - summary by WBS
+- 'errors' - this sheet is addeed to the report in case a project with PROJECT_ID has entries in the BQ with multiple billing_labels - in this case the project_id as well as all projects with the umbigous billing_labels **WILL BE EXCLUDED FROM THE REPORT**.
+
+
 Run the following to authenticate to google cloud sdk and install the packages:
 
 1. Authenticate: `gcloud auth application-default login`
 
 2. Install python packages: `pip3 install -r scripts/requirements.txt`
 
-## Version 1: extract only specified projects marked by billing label in BQ
+3. Run the script
 
-This version of the tool extracts only projects with the billing label specified in the provided input metadata. Generates summary of the costs on two levels: 
-- Summary by project_id
-- Summary by WBS
+**Version 1:** extract only specified projects marked by billing label in BQ
 
-
-Run billing report script ver1: extract only billing labels that are specified in the metadata:
+This version of the tool extracts only projects with the billing label specified in the provided input metadata. Run billing report script ver1: extract only billing labels that are specified in the metadata (flag `--mode metadata_billing_label`):
 
 Estimate the costs implied by the script for extracting the data from BQ (no queries are actually excuted):
 ```
@@ -32,6 +36,7 @@ scripts/billing_report.py \
 --bucket GCP_BUCKET_WITH_METADATA_FILE \
 --year 2023 \
 --month 7 \
+--mode metadata_billing_label \
 --dry-run True 
 ```
 
@@ -45,48 +50,15 @@ scripts/billing_report.py \
 --bucket GCP_BUCKET_WITH_METADATA_FILE \
 --year 2023 \
 --month 7 \
+--mode metadata_billing_label \
 --dry-run False
 
 ```
 
-**V1 USAGE**
 
-```
-Script prepares billing report.
+**Version 2:** extract all projects from BQ which includes unlabled projects as well
 
-options:
-  -h, --help            show this help message and exit
-  -p PROJECT, --project PROJECT
-                        PROJECT ID in which BQ billing table is stored.
-  -d DATASET, --dataset DATASET
-                        BigQuery dataset name (e.g. fimm_billing_data).
-  -t TABLE, --table TABLE
-                        BigQuery table name (e.g. gcp_billing_export_v1_015819_A39FE2_F94565).
-  -md METADATA, --metadata METADATA
-                        Metadata file storing project labels and description.
-  -b BUCKET, --bucket BUCKET
-                        Extract metadata from the given bucket omiting gs:// prefix.
-  -y YEAR, --year YEAR  Extract records for a given year.
-  -m MONTH, --month MONTH
-                        Extract records for a given month (number)
-  -dry DRY_RUN, --dry-run DRY_RUN
-                        Run queries in the DRY_RUN mode, i.e. no actual queries are executed. Used for estimating costs of sql queries
-  -o DIROUT, --dirout DIROUT
-                        Path to output file for saving report - not required if running with `--dry-run True`.
-  -s SAVE, --save SAVE  Save the extracted data frame to a separate CSV file.
-
-```
-
-## Version 2: extract all projects from BQ which includes unlabled projects as well
-
-This version of the tool extracts **all** records for the given month and gives the summary of the costs on three levels: 
-- Summary by project_id
-- Summary by billing label (e.g. "<WBS_NUMBER>_<SPECIFIC_LABEL>") - if there is no label, the costs for these unlabeled projects will be calculated in the separate row of the resulted excel table
-- Summary by WBS
-
-Output excel table will have 3 sheets: 'by GCP project', 'by billing label', 'by WBS'. 
-
-The metadata file is not required in this case. Run the following command (specify `-dry-run True` as in the other version if needed):
+This version of the tool extracts **all** records for the given month. The metadata file is required in this case just for matching the description to the projects if provided. Run the following command (specify `--mode full`):
 
 ```
 scripts/billing_report_full.py \
@@ -95,6 +67,7 @@ scripts/billing_report_full.py \
 --table BQ_TABLE_NAME \
 --year 2023 \
 --month 7 \
+--mode full \
 --dry-run False
 ```
 
@@ -127,10 +100,10 @@ SCANNING IS COMPLETED
 Total processing time: 10.97 mins
 ```
 
-**V2 USAGE**
+## USAGE
 
 ```
-Script prepares monthly billing report (full version).
+Script prepares monthly billing report.
 
 options:
   -h, --help            show this help message and exit
@@ -147,5 +120,13 @@ options:
                         Path to output file for saving report - not required if running with `--dry-run True`. (default: /Users/sanastas/Projects/sb_billing/billing-report)
   -dry DRY_RUN, --dry-run DRY_RUN
                         Run queries in the DRY_RUN mode, i.e. no actual queries are executed. Used for estimating costs of sql queries (default: True)
+  -mode {full,metadata_billing_label}, --mode {full,metadata_billing_label}
+                        Choose the mode to run: full (extracts all available data from the BQ table for a given month) or selected (extracts records for billing labels specified in the
+                        metadata file). Default: "full" (default: full)
+  -md METADATA, --metadata METADATA
+                        Metadata file storing project labels and description. (default: None)
+  -b BUCKET, --bucket BUCKET
+                        Extract metadata from the given bucket omiting gs:// prefix. (default: None)
 
 ```
+
