@@ -552,7 +552,6 @@ if __name__ == '__main__':
         batches = [(i, q, md.iloc[i]['description'], 'description', invoice_month, 
                     args.project_id, args.dry_run, tmpfile.name, tmpdir) for i, q in enumerate(queries)]
     
-    batches = batches[30:33]
     log.info(f"Prepared {len(batches)} batches to process")
         
     # process batches in parallel
