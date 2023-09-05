@@ -18,9 +18,13 @@ Run the following to authenticate to google cloud sdk and install the packages:
 
 1. Authenticate: `gcloud auth application-default login`
 
-2. Install python packages: `pip3 install -r scripts/requirements.txt`
+2. Install git and python on your machine if not installed (linux): `sudo apt update & sudo apt install python3-pip git`
 
-3. Run the script
+3. Clone the git repo: `git clone https://github.com/FINNGEN/billing-report.git`
+
+4. Install python packages: `cd billing-report && pip3 install -r scripts/requirements.txt`
+
+5. Run the script (below)
 
 **Version 1:** extract only specified projects marked by billing label in BQ
 
@@ -40,20 +44,7 @@ scripts/billing_report.py \
 --dry-run True 
 ```
 
-Once you familiarize yourself with the expected costs, run the following command:
-```
-scripts/billing_report.py \
---project PROJECT_ID_CONTAINING_BQ_TABLE \
---dataset BQ_DATASET_NAME \
---table BQ_TABLE_NAME \
---metadata METADATA_CSV \
---bucket GCP_BUCKET_WITH_METADATA_FILE \
---year 2023 \
---month 7 \
---mode metadata_billing_label \
---dry-run False
-
-```
+Once you familiarize yourself with the expected costs, run command disabling the dry-run (`--dry-run False`).
 
 
 **Version 2:** extract all projects from BQ which includes unlabled projects as well
