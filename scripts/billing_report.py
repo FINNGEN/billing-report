@@ -207,6 +207,7 @@ def get_dates(year, month):
 
 def multiproc_wrapper(args):
     ''' Multiproc wrapper function '''
+    
     try:
         res = process_query(*args)
     except Exception as e:
@@ -217,10 +218,10 @@ def multiproc_wrapper(args):
 
 def save_df(lst, name, dirout):
     '''Save date report'''
+
     cols = [lst[i].keys() for i,e in enumerate(lst) if len(lst[i]) > 0][0]
     df = pd.DataFrame.from_records(lst, columns=cols)
-    
-    fname = re.sub("[^A-Za-z0–9]", "_", name.lower())
+    fname = re.sub('[^A-Za-z0-9]+', "_", name.lower())
     fout = os.path.join(dirout, f'{fname}.csv')
     if df is not None:
         df.to_csv(fout, sep='\t', index=False)
