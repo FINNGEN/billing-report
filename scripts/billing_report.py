@@ -257,7 +257,7 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
             save_df(aggr, date_or_billing_lab, dir)
         
     e = datetime.datetime.now()
-    log.info(f"Batch {i}: Date {date_or_billing_lab} " + \
+    log.info(f"Batch {i}: {date_or_billing_lab} " + \
              f"proccessed in {round((e - s).seconds / 60, 2)} mins" )
     
     return pid_error
@@ -376,9 +376,6 @@ def combine_dates(tmpdir, metadata, err_df):
     for f in files:
         x = pd.read_csv(f, sep='\t', header=0,
                         dtype={'wbs': 'string','billing_label': 'string'})
-        log.info(f"Reading aggregated data for the date " + \
-                 f"{os.path.basename(f).split('.')[0]} - " + \
-                    f"read {x.shape[0]} records.")
         l.append(x)
     
     combined = pd.concat(l)
