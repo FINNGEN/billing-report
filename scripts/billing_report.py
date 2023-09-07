@@ -273,7 +273,7 @@ def create_tmp_dir(dirout, invoice_month):
 def summarize_costs(l, labels = ['GCP projects', 'Billing Label', 'WBS']):
     '''Summarize costs per each label'''
     log.info("\nTotals:")
-    for i in range(len(l)):
+    for i in range(len(labels)):
         by = labels[i]
         tot = l[i]['total'][l[i]['total'] != ''].iloc[0]
         log.info(f'\t{f"Total costs ({by}):".ljust(NCHARS)}{tot}')
