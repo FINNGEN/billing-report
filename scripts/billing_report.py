@@ -349,6 +349,8 @@ def exclude_umbigous_records(df, edf):
     
     wbsdup = edf[wbs].duplicated()
     ex_wbs = flatten(edf[wbs][~wbsdup].apply(lambda x: x.split(';') ).values)
+
+    
     
     lw = "(labels: '" + edf[bl] + "' wbs: '" + edf[wbs]+ "')"
     erlist = sep + sep.join(edf[pid] + lw)
@@ -359,10 +361,14 @@ def exclude_umbigous_records(df, edf):
     ids = df.apply(
         lambda x: x.loc[pid] in ex_projects or x.loc[wbs] in ex_wbs \
             or x.loc[bl] in ex_billing_labs, axis=1)
+    
+    df_excluded = df[ids]
+    df_excluded = df_excluded.reset_index(drop=True)
+
     df_filt = df[~ids]
     df_filt = df_filt.reset_index(drop=True)
     
-    return df_filt
+    return df_filt, df_excluded
 
 
 def combine_dates(tmpdir, metadata, err_df):
@@ -384,7 +390,9 @@ def combine_dates(tmpdir, metadata, err_df):
     
     # if projects with errors were observed, exclude them altogether
     if len(err_df) > 0:
-        combined = exclude_umbigous_records(combined, err_df)
+        combined, excluded = exclude_umbigous_records(combined, err_df)
+    else:
+        excluded = pd.DataFrame()
     
     # match the description
     metadata = md.copy()
@@ -422,6 +430,8 @@ def combine_dates(tmpdir, metadata, err_df):
         t['total'][len(t)-1] = t['total_cost'].sum()
         res.append(t)
     
+    res.append(excluded)
+
     return res
 
 def save_excel(df_list, df_errors, invoice_month, dirout, mode):
@@ -434,6 +444,7 @@ def save_excel(df_list, df_errors, invoice_month, dirout, mode):
         df_list[1].to_excel(writer, sheet_name="by billing label", index=False)
         df_list[2].to_excel(writer, sheet_name="by WBS", index=False)
         df_errors.to_excel(writer, sheet_name="errors", index=False)
+        df_list[3].to_excel(writer, sheet_name="dropped projects", index=False)
         log.info(f'\nSaved report to {fout}')
 
 def flatten(l):
