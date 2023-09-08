@@ -315,7 +315,7 @@ def aggregate_by_attribute(df, by = 'project_id', drop_cols=[]):
     ], axis = 1)
     
     # re-order and drop index
-    order = ['project_id', 'project_name', 'description', 'billing_label', 'wbs']
+    order = ['project_id', 'project_name', 'billing_label', 'description', 'wbs']
     cols_order = [c for c in order if c in list(res.columns)] + list(set(res.columns).difference(set(order)))                 
     cols = unique_list([by] + cols_order)
     res[by] = res.index
@@ -487,9 +487,11 @@ def save_err(df_excluded, df_errors, dirout, mode):
     with pd.ExcelWriter(fout) as writer:
         df_errors.to_excel(writer, sheet_name="errors", index=False)
         df_excluded.to_excel(writer, sheet_name="excluded data", index=False)
+
         pd.DataFrame({'project_id': pid}).to_excel(writer, sheet_name="excluded projects", index=False)
         pd.DataFrame({'billing_label': billing_label}).to_excel(writer, sheet_name="excluded billing labels", index=False)
         pd.DataFrame({'wbs': wbs}).to_excel(writer, sheet_name="excluded wbs", index=False)
+
         log.info(f'\nSaved report to {fout}')
 
 
