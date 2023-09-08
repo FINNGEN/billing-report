@@ -479,9 +479,9 @@ def save_err(df_excluded, df_errors, dirout, mode):
     wbs = []
     billing_label = []
     if len(df_errors) > 0:
-        pid = unique_list(df_errors['project_id'].values)
-        wbs = unique_list(df_errors['wbs'].apply(lambda x: x.split(';')).values)
-        billing_label = unique_list(df_errors['billing_label'].apply(lambda x: x.split(';')).values)
+        pid = unique_list(list(df_errors['project_id'].values))
+        wbs = unique_list(list(df_errors['wbs'].apply(lambda x: x.split(';')).values))
+        billing_label = unique_list(list(df_errors['billing_label'].apply(lambda x: x.split(';')).values))
     
     # save to a separte report
     with pd.ExcelWriter(fout) as writer:
