@@ -485,8 +485,8 @@ def save_err(df_excluded, df_errors, dirout, mode):
     
     # save to a separte report
     with pd.ExcelWriter(fout) as writer:
+        df_excluded.to_excel(writer, sheet_name="excluded from report (costs by proj)", index=False)
         df_errors.to_excel(writer, sheet_name="errors", index=False)
-        df_excluded.to_excel(writer, sheet_name="excluded from report (project)", index=False)
 
         pd.DataFrame({'project_id': pid}).to_excel(writer, sheet_name="excluded projects", index=False)
         pd.DataFrame({'billing_label': billing_label}).to_excel(writer, sheet_name="excluded billing labels", index=False)
@@ -494,14 +494,11 @@ def save_err(df_excluded, df_errors, dirout, mode):
 
         log.info(f'\nSaved report to {fout}')
 
-
-
 def remove_temp_files(dir):
     '''Remove tmp files'''
     files = [os.path.join(dir, f) for f in os.listdir(dir)]
     for f in files:
-        # os.remove(f)
-        print("REMOVE file", f)
+        os.remove(f)
 
 def parse_args():
     ''' Parse arguments '''
