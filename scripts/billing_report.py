@@ -92,9 +92,7 @@ def aggregate_by_project(df, key, value):
                     'project_id': p, 
                     'billing_label': ';'.join(list(set(d['billing_label']))),
                     'wbs': ';'.join(list(set(d['wbs']))),
-                    'value': value, 
-                    'action': 'excluded project_id/billing_label/wbs from the report', 
-                    'error': e
+                    'value': value
                 })
             else:
                 r[key] = value
@@ -391,8 +389,12 @@ def combine_dates(tmpdir, metadata, err_df):
     # if projects with errors were observed, exclude them altogether
     if len(err_df) > 0:
         combined, excluded = exclude_umbigous_records(combined, err_df)
+        # aggregate per attribute
+        pr_excluded = aggregate_by_attribute(
+            excluded, by = 'project_id', drop_cols=['date']
+        )
     else:
-        excluded = pd.DataFrame()
+        pr_excluded = pd.DataFrame()
     
     # match the description
     metadata = md.copy()
@@ -430,11 +432,9 @@ def combine_dates(tmpdir, metadata, err_df):
         t['total'][len(t)-1] = t['total_cost'].sum()
         res.append(t)
     
-    res.append(excluded)
+    return res, pr_excluded
 
-    return res
-
-def save_excel(df_list, df_errors, invoice_month, dirout, mode):
+def save_excel(df_list, invoice_month, dirout, mode):
     ''' Save dataframes to the excel file'''
     
     fname = f"report_{invoice_month}_{mode}.xlsx"
@@ -443,8 +443,6 @@ def save_excel(df_list, df_errors, invoice_month, dirout, mode):
         df_list[0].to_excel(writer, sheet_name="by GCP project", index=False)
         df_list[1].to_excel(writer, sheet_name="by billing label", index=False)
         df_list[2].to_excel(writer, sheet_name="by WBS", index=False)
-        df_errors.to_excel(writer, sheet_name="errors", index=False)
-        df_list[3].to_excel(writer, sheet_name="dropped projects", index=False)
         log.info(f'\nSaved report to {fout}')
 
 def flatten(l):
@@ -467,6 +465,42 @@ def get_metadata(bucket_name, m_filename):
     else:
         log.info('Succesfully read metadata file')
         return dat
+
+def save_err(df_excluded, df_errors, dirout, mode):
+    '''Save errors into a separate excel file'''
+
+    fname = f"report_{invoice_month}_{mode}_ERRORS.xlsx"
+    fout = os.path.join(dirout, fname)
+    
+    df_errors = df_errors.rename(columns = {'value': 'date'})
+    
+    # summarize
+    pid = []
+    wbs = []
+    billing_label = []
+    if len(df_errors) > 0:
+        pid = unique_list(df_errors['project_id'].values)
+        wbs = unique_list(df_errors['wbs'].apply(lambda x: x.split(';')).values)
+        billing_label = unique_list(df_errors['billing_label'].apply(lambda x: x.split(';')).values)
+    
+    # save to a separte report
+    with pd.ExcelWriter(fout) as writer:
+        df_errors.to_excel(writer, sheet_name="errors", index=False)
+        df_excluded.to_excel(writer, sheet_name="excluded data", index=False)
+        pd.DataFrame({'project_id': pid}).to_excel(writer, sheet_name="excluded projects", index=False)
+        pd.DataFrame({'billing_label': billing_label}).to_excel(writer, sheet_name="excluded billing labels", index=False)
+        pd.DataFrame({'wbs': wbs}).to_excel(writer, sheet_name="excluded wbs", index=False)
+
+        log.info(f'\nSaved report to {fout}')
+
+
+
+def remove_temp_files(dir):
+    '''Remove tmp files'''
+    files = [os.path.join(dir, f) for f in os.listdir(dir)]
+    for f in files:
+        # os.remove(f)
+        print("REMOVE file", f)
 
 def parse_args():
     ''' Parse arguments '''
@@ -509,6 +543,11 @@ def parse_args():
     
     parser.add_argument('-b', '--bucket', required=True, 
                         help='Extract metadata from the given bucket omiting gs:// prefix.')
+    
+    parser.add_argument('-r', '--remove', dest='remove', required=False,
+                        default=False, type=str2bool,
+                        help="Remove temporary files that are used for creating a final report (e.g. extracted costs per day/billing label. " + \
+                            "These will be saved to invoice<YEARMONTH>_ts_<TIMESTAMP> under the dirout folder)")
 
     args = parser.parse_args()
     return args
@@ -530,7 +569,7 @@ if __name__ == '__main__':
     md = get_metadata(args.bucket, args.metadata)
     
     # create tmp dir and tmp file for storing daily data and bq costs per query
-    tmpdir = create_tmp_dir(args.dirout, invoice_month) if not args.dry_run else ''
+    dirout = create_tmp_dir(args.dirout, invoice_month) if not args.dry_run else ''
     tmpfile = tempfile.NamedTemporaryFile(prefix='_bqcosts_', dir=args.dirout)
     
     with open(tmpfile.name, 'w') as f:
@@ -547,7 +586,7 @@ if __name__ == '__main__':
         
         # get batches
         batches = [(i, q, dates[i], 'date', invoice_month, args.project_id, 
-                    args.dry_run, tmpfile.name, tmpdir) for i, q in enumerate(queries)]
+                    args.dry_run, tmpfile.name, dirout) for i, q in enumerate(queries)]
     
     # else generate queries to extract data per billing label
     else:
@@ -562,24 +601,31 @@ if __name__ == '__main__':
         
         # get batches
         batches = [(i, q, md.iloc[i]['description'], 'description', invoice_month, 
-                    args.project_id, args.dry_run, tmpfile.name, tmpdir) for i, q in enumerate(queries)]
+                    args.project_id, args.dry_run, tmpfile.name, dirout) for i, q in enumerate(queries)]
     
     log.info(f"Prepared {len(batches)} batches to process")
         
     # process batches in parallel
     cpus = multiprocessing.cpu_count()
     with Pool(processes=cpus) as pool:
-        err = pool.map(multiproc_wrapper, batches)
-        err_df = pd.DataFrame(flatten(err))
+        e = pool.map(multiproc_wrapper, batches)
+        df_errors = pd.DataFrame(flatten(e))
     
     # aggregate data and 
     if not args.dry_run:
 
         # combine across the dates
-        result = combine_dates(tmpdir, md, err_df)
+        result, df_excluded = combine_dates(dirout, md, df_errors)
+
+        # remove temp files if needed
+        if args.remove:
+            remove_temp_files(dirout)
 
         # save to excel
-        save_excel(result, err_df, invoice_month, args.dirout, args.mode)
+        save_excel(result, invoice_month, dirout, args.mode)
+
+        # save errors separately
+        save_err(df_excluded, df_errors, dirout, args.mode)
 
         # summarize costs
         summarize_costs(result)
