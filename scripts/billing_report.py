@@ -480,8 +480,8 @@ def save_err(df_excluded, df_errors, dirout, mode):
     billing_label = []
     if len(df_errors) > 0:
         pid = unique_list(list(df_errors['project_id'].values))
-        wbs = unique_list(list(df_errors['wbs'].apply(lambda x: x.split(';')).values))
-        billing_label = unique_list(list(df_errors['billing_label'].apply(lambda x: x.split(';')).values))
+        wbs = unique_list(flatten(list(df_errors['wbs'].apply(lambda x: x.split(';')))))
+        billing_label = unique_list(flatten(list(df_errors['billing_label'].apply(lambda x: x.split(';')).values)))
     
     # save to a separte report
     with pd.ExcelWriter(fout) as writer:
@@ -490,7 +490,6 @@ def save_err(df_excluded, df_errors, dirout, mode):
         pd.DataFrame({'project_id': pid}).to_excel(writer, sheet_name="excluded projects", index=False)
         pd.DataFrame({'billing_label': billing_label}).to_excel(writer, sheet_name="excluded billing labels", index=False)
         pd.DataFrame({'wbs': wbs}).to_excel(writer, sheet_name="excluded wbs", index=False)
-
         log.info(f'\nSaved report to {fout}')
 
 
