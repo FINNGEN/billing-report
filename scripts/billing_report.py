@@ -315,7 +315,8 @@ def aggregate_by_attribute(df, by = 'project_id', drop_cols=[]):
     ], axis = 1)
     
     # re-order and drop index
-    order = ['project_id', 'project_name', 'billing_label', 'description', 'wbs']
+    order = ['project_id', 'project_name', 'billing_label', 'description', 'wbs', 'cost', 'discount', 'total_cost']
+    
     cols_order = [c for c in order if c in list(res.columns)] + list(set(res.columns).difference(set(order)))                 
     cols = unique_list([by] + cols_order)
     res[by] = res.index
