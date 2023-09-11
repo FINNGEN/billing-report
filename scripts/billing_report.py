@@ -535,7 +535,7 @@ def parse_args():
                         help='Extract metadata from the given bucket omiting gs:// prefix.')
     
     parser.add_argument('-r', '--remove', dest='remove', required=False,
-                        default=False, type=str2bool,
+                        default=True, type=str2bool,
                         help="Remove temporary files that are used for creating a final report (e.g. extracted costs per day/billing label. " + \
                             "These will be saved to invoice<YEARMONTH>_ts_<TIMESTAMP> under the dirout folder)")
 
