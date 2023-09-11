@@ -486,11 +486,10 @@ def save_err(df_excluded, df_errors, dirout, mode):
     # save to a separte report
     with pd.ExcelWriter(fout) as writer:
         df_excluded.to_excel(writer, sheet_name="excluded from report(by proj)", index=False)
-        df_errors.to_excel(writer, sheet_name="errors", index=False)
-
-        pd.DataFrame({'project_id': pid}).to_excel(writer, sheet_name="excluded projects", index=False)
+        # df_errors.to_excel(writer, sheet_name="errors", index=False)
+        # pd.DataFrame({'project_id': pid}).to_excel(writer, sheet_name="excluded projects", index=False)
         pd.DataFrame({'billing_label': billing_label}).to_excel(writer, sheet_name="excluded billing labels", index=False)
-        pd.DataFrame({'wbs': wbs}).to_excel(writer, sheet_name="excluded wbs", index=False)
+        # pd.DataFrame({'wbs': wbs}).to_excel(writer, sheet_name="excluded wbs", index=False)
 
         log.info(f'\nSaved report to {fout}')
 
