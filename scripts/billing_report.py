@@ -432,6 +432,8 @@ def combine_dates(tmpdir, metadata, err_df):
         t['total'][len(t)-1] = t['total_cost'].sum()
         res.append(t)
     
+    pr_excluded.rename(columns={'billing_label': 'billing_label(s)', 'wbs': 'wbs(s)'})
+
     return res, pr_excluded
 
 def save_excel(df_list, invoice_month, dirout, mode):
@@ -472,25 +474,15 @@ def save_err(df_excluded, df_errors, dirout, mode):
     fname = f"report_{invoice_month}_{mode}_ERRORS.xlsx"
     fout = os.path.join(dirout, fname)
     
-    df_errors = df_errors.rename(columns = {'value': 'date'})
-    
     # summarize
-    pid = []
-    wbs = []
     billing_label = []
     if len(df_errors) > 0:
-        pid = unique_list(list(df_errors['project_id'].values))
-        wbs = unique_list(flatten(list(df_errors['wbs'].apply(lambda x: x.split(';')))))
         billing_label = unique_list(flatten(list(df_errors['billing_label'].apply(lambda x: x.split(';')).values)))
     
     # save to a separte report
     with pd.ExcelWriter(fout) as writer:
         df_excluded.to_excel(writer, sheet_name="excluded from report(by proj)", index=False)
-        # df_errors.to_excel(writer, sheet_name="errors", index=False)
-        # pd.DataFrame({'project_id': pid}).to_excel(writer, sheet_name="excluded projects", index=False)
         pd.DataFrame({'billing_label': billing_label}).to_excel(writer, sheet_name="excluded billing labels", index=False)
-        # pd.DataFrame({'wbs': wbs}).to_excel(writer, sheet_name="excluded wbs", index=False)
-
         log.info(f'\nSaved report to {fout}')
 
 def remove_temp_files(dir):
