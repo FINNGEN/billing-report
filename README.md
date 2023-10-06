@@ -121,3 +121,17 @@ options:
 
 ```
 
+## Running from the dedicated setup environment
+
+Run simply by calling:
+```
+billing --project PROJECT_ID_CONTAINING_BQ_TABLE \
+--dataset BQ_DATASET_NAME \
+--table BQ_TABLE_NAME \
+--metadata METADATA_CSV \
+--bucket GCP_BUCKET_WITH_METADATA_FILE \
+--year 2023 \
+--month 7 \
+--mode metadata_billing_label \
+--dry-run True 
+```
