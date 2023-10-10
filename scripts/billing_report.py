@@ -103,10 +103,10 @@ def aggregate_by_project(df, key, value):
     
     return res, pid_error
 
-def run_query(date_or_billing_lab, query, client, invoice_month, dry_run=False, page_size=10000):
+def run_query(date_or_billing_lab, query, client, invoice_month, prev_lookup, dry_run=False, page_size=10000):
     '''Run BQ query and return query result as dataframe, data billed / data read in GB (term - either date or a billing label)'''
     
-    df = None
+    df = pd.DataFrame()
     if dry_run:
         job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
         q = client.query(query, job_config=job_config)
@@ -124,7 +124,7 @@ def run_query(date_or_billing_lab, query, client, invoice_month, dry_run=False, 
     match = prev_lookup[prev_lookup['basename'].apply(lambda x: pattern + '.csv' == x)]
     
     fout = None
-    if not dry_run and len(match) == 0:
+    if not dry_run and match.empty:
         start_bq = datetime.datetime.now()
         n = math.ceil(result.total_rows / page_size)
         log.info(f"[BQ] {date_or_billing_lab} - Extracted BQ table is too large ({result.total_rows} rows) - read table in chunks. Total {n} chunks")
@@ -143,10 +143,10 @@ def run_query(date_or_billing_lab, query, client, invoice_month, dry_run=False, 
         # filter by invoice month
         ids = df['invoice'].apply(lambda x: x['month'] == invoice_month)
         df = df[ids]
-        if len(df) > 0:
+        if not df.empty:
             df = df.reset_index(drop=True) 
     else:
-        fout = match['full_path']
+        fout = list(match['full_path'])[0]
     
     return b, p, df, fout
 
@@ -265,7 +265,7 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
     
     # fetch data from the BQ
     billed, processed, df, fout = run_query(
-        date_or_billing_lab, query, client, invoice_month, dry_run, prev_lookup
+        date_or_billing_lab, query, client, invoice_month, prev_lookup, dry_run
     )
     log.info(f"\tBatch {i}: {date_or_billing_lab} - ran the query, obtained data with {df.shape[0]} rows." )
     
@@ -276,7 +276,7 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
     # unnest billing label and aggreagate data by project_id
     pid_error = []
     if df is not None and fout is None:
-        if len(df) > 0:
+        if not df.empty:
             res = unnest_labels(df)
             log.info(f"\tBatch {i}: {date_or_billing_lab} - unnested the labels" )
             aggr, pid_error = aggregate_by_project(
@@ -288,12 +288,13 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
             fout = save_df(aggr, date_or_billing_lab, dirout)
             log.info(f"\tBatch {i}: {date_or_billing_lab} - saved to {dirout}" )
     else:
-        log.info(f"\tBatch {i}: {date_or_billing_lab} - getting  previously saved data from to {fout}" )
+        log.info(f"\tBatch {i}: {date_or_billing_lab} - getting previously saved data from ---- {fout}" )
         
     e = datetime.datetime.now()
     log.info(f"Batch {i}: {date_or_billing_lab} " + \
              f"proccessed in {round((e - s).seconds / 60, 2)} mins" )
     
+    log.info(f"\tBatch {i}: return file {fout}" )
     return pid_error, fout
 
 def create_tmp_dir(dirout, invoice_month):
@@ -406,14 +407,11 @@ def exclude_umbigous_records(df, edf):
 def combine_dates(files, metadata, err_df):
     '''Read files per date, combine and aggregate data per project/billing label/wbs'''
     
-    # list all files created in the tmp folder
-    # files = [os.path.join(tmpdir, f) for f in os.listdir(tmpdir)]
-    
     # combine
     l = []
     log.info("\nStarting to combine data across the dates.")
     for i,f in enumerate(files):
-        log.info(f"\tCombine file {i} to the finale table: {f}")
+        log.info(f"\tCombine file {i} to the final table: {f}")
         x = pd.read_csv(f, sep='\t', header=0,
                         dtype={'wbs': 'string','billing_label': 'string'})
         l.append(x)
@@ -422,7 +420,7 @@ def combine_dates(files, metadata, err_df):
     combined = combined.fillna('')
     
     # if projects with errors were observed, exclude them altogether
-    if len(err_df) > 0:
+    if not err_df.empty:
         combined, excluded = exclude_umbigous_records(combined, err_df)
         
         # aggregate per attribute
@@ -434,6 +432,7 @@ def combine_dates(files, metadata, err_df):
     
     # match the description
     metadata = md.copy()
+
     if 'description' not in combined.columns:
         metadata['billing_label'] = 'billing_' + metadata['label']
         metadata.index = metadata['billing_label']
@@ -446,9 +445,7 @@ def combine_dates(files, metadata, err_df):
                            index=d)
         
         metadata = pd.concat([metadata, add])
-        combined['description'] = metadata.loc[
-            combined['billing_label']
-        ]['description'].values
+        combined['description'] = metadata.loc[combined['billing_label']]['description'].values
     
     # aggregate per attribute
     pr = aggregate_by_attribute(
@@ -512,7 +509,7 @@ def save_err(df_excluded, df_errors, dirout, mode):
     
     # summarize
     billing_label = []
-    if len(df_errors) > 0:
+    if not df_errors.empty:
         billing_label = unique_list(flatten(list(df_errors['billing_label'].apply(lambda x: x.split(';')).values)))
     
     # save to a separte report
@@ -648,11 +645,14 @@ if __name__ == '__main__':
     log.info(f"Prepared {len(batches)} batches to process")
         
     # process batches in parallel
+
+    batches = batches[1:5]
+
     cpus = multiprocessing.cpu_count()
     with Pool(processes=cpus) as pool:
         e, saved_files = zip(*pool.map(multiproc_wrapper, batches))
-        df_errors = pd.DataFrame(flatten(e))
-        files_out = flatten(saved_files)
+        df_errors = pd.DataFrame(e)
+        files_out = [f for f in saved_files if f is not None]
     
     # aggregate data and 
     if not args.dry_run:
