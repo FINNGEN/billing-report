@@ -258,6 +258,7 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
     billed, processed, df = run_query(
         date_or_billing_lab, query, client, invoice_month, dry_run
     )
+    log.info(f"\tBatch {i}: {date_or_billing_lab} - ran the query, obtained data with {df.shape[0]} rows." )
     
     # append the line to the report
     with open(tmpfile, 'a') as f:
@@ -268,12 +269,15 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
     if df is not None:
         if len(df) > 0:
             res = unnest_labels(df)
+            log.info(f"\tBatch {i}: {date_or_billing_lab} - unnested the labels" )
             aggr, pid_error = aggregate_by_project(
                 res, 
                 date_or_billing_lab_name, 
                 date_or_billing_lab
             )
+            log.info(f"\tBatch {i}: {date_or_billing_lab} - aggregated" )
             save_df(aggr, date_or_billing_lab, dir)
+            log.info(f"\tBatch {i}: {date_or_billing_lab} - saved" )
         
     e = datetime.datetime.now()
     log.info(f"Batch {i}: {date_or_billing_lab} " + \
