@@ -2,3 +2,4 @@ invoice*
 report_*
 .DS_Store
 *_logs*
+*env*

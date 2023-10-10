@@ -5,6 +5,7 @@ import re
 import io
 import os
 import sys
+import math
 import logging
 import warnings
 import argparse
@@ -78,10 +79,12 @@ def unnest_labels(df):
 
 def aggregate_by_project(df, key, value):
     '''Aggregate biiling data in the data frame'''
+    
     res = []
     pid_error = []
     if df.shape[0] > 0:
         grouped = df.groupby(df['id'])
+        
         for p in grouped.groups.keys():
             d = grouped.get_group(p)                
             try:
@@ -97,29 +100,46 @@ def aggregate_by_project(df, key, value):
             else:
                 r[key] = value
                 res.append(r)
+    
     return res, pid_error
 
-def run_query(date_or_billing_lab, query, client, invoice_month, dry_run=False):
+def run_query(date_or_billing_lab, query, client, invoice_month, dry_run=False, page_size=10000):
     '''Run BQ query and return query result as dataframe, data billed / data read in GB (term - either date or a billing label)'''
     
-    if (dry_run):
+    if dry_run:
         job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
         q = client.query(query, job_config=job_config)
         df = None
     else:
         q = client.query(query)
-        df = q.to_dataframe()
         
+    b = q.total_bytes_billed
+    p = q.total_bytes_processed
+    
+    log.info(f"[BQ] {date_or_billing_lab} - total bytes billed {b} ({round(b * 1e-09, 4)} GB) / processed: {p} ({round(p * 1e-09, 4)} GB)")    
+    result = q.result(page_size=page_size)
+    
+    if not dry_run:
+        start_bq = datetime.datetime.now()
+        n = math.ceil(result.total_rows / page_size)
+        log.info(f"[BQ] {date_or_billing_lab} - Extracted BQ table is too large ({result.total_rows} rows) - read table in chunks. Total {n} chunks")
+        
+        lst = []
+        for partial_df in result.to_dataframe_iterable():
+            if len(lst) % 10 == 0:
+                log.info(f"[BQ] {date_or_billing_lab} - {len(lst)} pages processed out of {n}")
+            lst.append(partial_df)
+        df = pd.concat(lst)
+        
+        end_bq = datetime.datetime.now()
+        log.info(f"[BQ] {date_or_billing_lab} - Total processing time: {round((end_bq - start_bq).seconds / 60, 2)} mins")
+        # df = q.to_dataframe()
+            
         # filter by invoice month
         ids = df['invoice'].apply(lambda x: x['month'] == invoice_month)
         df = df[ids]
         if len(df) > 0:
             df = df.reset_index(drop=True) 
-    
-    b = q.total_bytes_billed
-    p = q.total_bytes_processed
-    
-    log.info(f"[BQ] {date_or_billing_lab} - total bytes billed {b} ({round(b * 1e-09, 4)} GB) / processed: {p} ({round(p * 1e-09, 4)} GB)")
     
     return b, p, df
 
@@ -348,8 +368,6 @@ def exclude_umbigous_records(df, edf):
     
     wbsdup = edf[wbs].duplicated()
     ex_wbs = flatten(edf[wbs][~wbsdup].apply(lambda x: x.split(';') ).values)
-
-    
     
     lw = "(labels: '" + edf[bl] + "' wbs: '" + edf[wbs]+ "')"
     erlist = sep + sep.join(edf[pid] + lw)
@@ -363,7 +381,7 @@ def exclude_umbigous_records(df, edf):
     
     df_excluded = df[ids]
     df_excluded = df_excluded.reset_index(drop=True)
-
+    
     df_filt = df[~ids]
     df_filt = df_filt.reset_index(drop=True)
     
@@ -471,7 +489,7 @@ def get_metadata(bucket_name, m_filename):
 
 def save_err(df_excluded, df_errors, dirout, mode):
     '''Save errors into a separate excel file'''
-
+    
     fname = f"report_{invoice_month}_{mode}_ERRORS.xlsx"
     fout = os.path.join(dirout, fname)
     
