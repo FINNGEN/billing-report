@@ -113,8 +113,8 @@ def run_query(date_or_billing_lab, query, client, invoice_month, dry_run=False, 
     else:
         q = client.query(query)
         
-    b = q.total_bytes_billed
-    p = q.total_bytes_processed
+    b = 0 if q.total_bytes_billed is None else q.total_bytes_billed
+    p = 0 if q.total_bytes_processed is None else q.total_bytes_processed
     
     log.info(f"[BQ] {date_or_billing_lab} - total bytes billed {b} ({round(b * 1e-09, 4)} GB) / processed: {p} ({round(p * 1e-09, 4)} GB)")    
     result = q.result(page_size=page_size)
@@ -245,7 +245,7 @@ def save_df(lst, name, dirout):
         df.to_csv(fout, sep='\t', index=False)
 
 def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name, 
-                  invoice_month, project_id, dry_run, tmpfile, dir=''):
+                  invoice_month, project_id, dry_run, tmpfile, dirout=''):
     '''Process single date query to extract labeled/unlabeled/wbs sums'''
     
     s = datetime.datetime.now()
@@ -276,8 +276,8 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
                 date_or_billing_lab
             )
             log.info(f"\tBatch {i}: {date_or_billing_lab} - aggregated" )
-            save_df(aggr, date_or_billing_lab, dir)
-            log.info(f"\tBatch {i}: {date_or_billing_lab} - saved" )
+            save_df(aggr, date_or_billing_lab, dirout)
+            log.info(f"\tBatch {i}: {date_or_billing_lab} - saved to {dirout}" )
         
     e = datetime.datetime.now()
     log.info(f"Batch {i}: {date_or_billing_lab} " + \
