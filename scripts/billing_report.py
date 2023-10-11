@@ -610,6 +610,8 @@ if __name__ == '__main__':
     tmpfile = tempfile.NamedTemporaryFile(prefix='_bqcosts_', dir=args.dirout)
 
     lookup = check_prev_runs(dirout)
+    log.info("Found the following data from the previuos runs:")
+    print(lookup)
     
     with open(tmpfile.name, 'w') as f:
         _ = f.write(f"DATE\tBQ_PROCESSED_BYTES\tBQ_BILLED_BYTES\n")
