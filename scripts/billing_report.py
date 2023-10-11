@@ -271,7 +271,6 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
     billed, processed, df, fout = run_query(
         date_or_billing_lab, query, client, invoice_month, prev_lookup, dry_run
     )
-    log.info(f"Batch {i}: {date_or_billing_lab} - executed the query & obtained data with {df.shape[0]} rows." )
     
     # append the line to the report
     with open(tmpfile, 'a') as f:
@@ -280,6 +279,7 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
     # unnest billing label and aggreagate data by project_id
     pid_error = []
     if df is not None and fout is None:
+        log.info(f"Batch {i}: {date_or_billing_lab} - process obtained rows." )
         if not df.empty:
             res = unnest_labels(df)
             log.info(f"Batch {i}: {date_or_billing_lab} - unnested the labels" )
@@ -292,13 +292,12 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
             fout = save_df(aggr, date_or_billing_lab, dirout)
             log.info(f"Batch {i}: {date_or_billing_lab} - saved to {dirout}" )
     else:
-        log.info(f"Batch {i}: {date_or_billing_lab} - getting previously saved data from ---- {fout}" )
+        log.info(f"Batch {i}: {date_or_billing_lab} - getting previously saved data from {fout}" )
         
     e = datetime.datetime.now()
     log.info(f"Batch {i}: {date_or_billing_lab} " + \
-             f"proccessed in {round((e - s).seconds / 60, 2)} mins" )
+             f"proccessing finished in {round((e - s).seconds / 60, 2)} mins" )
     
-    log.info(f"Batch {i}: return file {fout}" )
     return pid_error, fout
 
 def create_tmp_dir(dirout, invoice_month):
@@ -599,7 +598,6 @@ if __name__ == '__main__':
     args = parse_args()
     
     start_ts = datetime.datetime.now()
-    print('\n' + ('').center(70, '='))
     log.info("STARTING BILLING REPORT PREPARATION\n")
 
     # inititalize invoice month, bq table name and bq client
