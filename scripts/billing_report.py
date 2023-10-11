@@ -19,7 +19,10 @@ from google.cloud import storage
 from google.cloud import bigquery
 from datetime import date, timedelta
 
-logging.basicConfig(level=logging.INFO, format='%(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+logging.basicConfig(
+    format='%(asctime)s %(levelname)-8s %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S')
 
 log = logging.getLogger()
 
@@ -596,7 +599,7 @@ if __name__ == '__main__':
     args = parse_args()
     
     start_ts = datetime.datetime.now()
-    log.info('\n' + ('').center(50, '='))
+    print('\n' + ('').center(70, '='))
     log.info("STARTING BILLING REPORT PREPARATION\n")
 
     # inititalize invoice month, bq table name and bq client
