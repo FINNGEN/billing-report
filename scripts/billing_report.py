@@ -647,9 +647,7 @@ if __name__ == '__main__':
     log.info(f"Prepared {len(batches)} batches to process")
         
     # process batches in parallel
-
-    batches = batches[1:5]
-
+    # batches = batches[1:5]
     cpus = multiprocessing.cpu_count()
     with Pool(processes=cpus) as pool:
         e, saved_files = zip(*pool.map(multiproc_wrapper, batches))
