@@ -271,7 +271,7 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
     billed, processed, df, fout = run_query(
         date_or_billing_lab, query, client, invoice_month, prev_lookup, dry_run
     )
-    log.info(f"\tBatch {i}: {date_or_billing_lab} - ran the query, obtained data with {df.shape[0]} rows." )
+    log.info(f"Batch {i}: {date_or_billing_lab} - executed the query & obtained data with {df.shape[0]} rows." )
     
     # append the line to the report
     with open(tmpfile, 'a') as f:
@@ -282,23 +282,23 @@ def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name,
     if df is not None and fout is None:
         if not df.empty:
             res = unnest_labels(df)
-            log.info(f"\tBatch {i}: {date_or_billing_lab} - unnested the labels" )
+            log.info(f"Batch {i}: {date_or_billing_lab} - unnested the labels" )
             aggr, pid_error = aggregate_by_project(
                 res, 
                 date_or_billing_lab_name, 
                 date_or_billing_lab
             )
-            log.info(f"\tBatch {i}: {date_or_billing_lab} - aggregated" )
+            log.info(f"Batch {i}: {date_or_billing_lab} - aggregated" )
             fout = save_df(aggr, date_or_billing_lab, dirout)
-            log.info(f"\tBatch {i}: {date_or_billing_lab} - saved to {dirout}" )
+            log.info(f"Batch {i}: {date_or_billing_lab} - saved to {dirout}" )
     else:
-        log.info(f"\tBatch {i}: {date_or_billing_lab} - getting previously saved data from ---- {fout}" )
+        log.info(f"Batch {i}: {date_or_billing_lab} - getting previously saved data from ---- {fout}" )
         
     e = datetime.datetime.now()
     log.info(f"Batch {i}: {date_or_billing_lab} " + \
              f"proccessed in {round((e - s).seconds / 60, 2)} mins" )
     
-    log.info(f"\tBatch {i}: return file {fout}" )
+    log.info(f"Batch {i}: return file {fout}" )
     return pid_error, fout
 
 def create_tmp_dir(dirout, invoice_month):
@@ -614,8 +614,6 @@ if __name__ == '__main__':
     tmpfile = tempfile.NamedTemporaryFile(prefix='_bqcosts_', dir=args.dirout)
 
     lookup = check_prev_runs(dirout)
-    log.info("Found the following data from the previuos runs:")
-    print(lookup)
     
     with open(tmpfile.name, 'w') as f:
         _ = f.write(f"DATE\tBQ_PROCESSED_BYTES\tBQ_BILLED_BYTES\n")
@@ -648,7 +646,7 @@ if __name__ == '__main__':
         batches = [(i, q, md.iloc[i]['description'], 'description', invoice_month, 
                     args.project_id, args.dry_run, tmpfile.name, dirout, lookup) for i, q in enumerate(queries)]
     
-    log.info(f"Prepared {len(batches)} batches to process")
+    log.info(f"Prepared {len(batches)} batches to process - will reuse {lookup.shape[0]} files. Remaining: {len(batches) - lookup.shape[0]}")
         
     # process batches in parallel
     # batches = batches[1:5]
