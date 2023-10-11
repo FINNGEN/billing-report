@@ -19,7 +19,8 @@ from google.cloud import storage
 from google.cloud import bigquery
 from datetime import date, timedelta
 
-logging.basicConfig(level=logging.INFO, format='%(message)s', "%Y-%m-%d %H:%M:%S")
+logging.basicConfig(level=logging.INFO, format='%(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
 log = logging.getLogger()
 
 warnings.filterwarnings('ignore')
