@@ -580,7 +580,7 @@ def parse_args():
 
     parser.add_argument('-o', '--dirout', dest='dirout', required=False, 
                         default=os.getcwd(),
-                        help="Path to output file for saving report - not required if running with `--dry-run True`.")
+                        help="Path to output file for saving report - not required if running with `--dry-run True`. (default: current working directory)")
     
     parser.add_argument('-dry', '--dry-run', dest='dry_run', required=False,
                         default=True, type=str2bool,
