@@ -46,7 +46,7 @@ def calculate_costs_and_discounts(qdf, error_label=''):
     attr = ['name', 'id', 'billing_label', 'wbs']
     d = {a: list(set(qdf[a]))[0] for a in attr} 
     for a in attr:
-        assert len(set(qdf[a])) == 1, f"\tERROR when aggregating by PROJECT_ID " + \
+        assert len(set(qdf[a])) == 1, f"when aggregating by PROJECT_ID " + \
             f"{pid} in {error_label} - label {a} assertion error :: not unique value - {set(qdf[a])}"
     
     # keys and values
@@ -85,7 +85,6 @@ def aggregate_by_project(df, key, value):
     '''Aggregate biiling data in the data frame'''
     
     res = []
-    pid_error = []
     if df.shape[0] > 0:
         grouped = df.groupby(df['id'])
         
@@ -95,19 +94,13 @@ def aggregate_by_project(df, key, value):
                 r = calculate_costs_and_discounts(d, value)
             except AssertionError as e:
                 log.error(e)
-                pid_error.append({
-                    'project_id': p, 
-                    'billing_label': ';'.join(list(set(d['billing_label']))),
-                    'wbs': ';'.join(list(set(d['wbs']))),
-                    'value': value
-                })
             else:
                 r[key] = value
                 res.append(r)
     
-    return res, pid_error
+    return res
 
-def run_query(date_or_billing_lab, query, client, invoice_month, prev_lookup, dry_run=False, page_size=10000):
+def run_query(query, client, dry_run=False):
     '''Run BQ query and return query result as dataframe, data billed / data read in GB (term - either date or a billing label)'''
     
     df = pd.DataFrame()
@@ -116,43 +109,8 @@ def run_query(date_or_billing_lab, query, client, invoice_month, prev_lookup, dr
         q = client.query(query, job_config=job_config)
     else:
         q = client.query(query)
-        
-    b = 0 if q.total_bytes_billed is None else q.total_bytes_billed
-    p = 0 if q.total_bytes_processed is None else q.total_bytes_processed
     
-    log.info(f"[BQ] {date_or_billing_lab} - total bytes billed {b} ({round(b * 1e-09, 4)} GB) / processed: {p} ({round(p * 1e-09, 4)} GB)")    
-    result = q.result(page_size=page_size)
-
-    # check if previously saved data exists
-    pattern = re.sub('[^A-Za-z0-9]+', "_", date_or_billing_lab.lower())
-    match = prev_lookup[prev_lookup['basename'].apply(lambda x: pattern + '.csv' == x)]
-    
-    fout = None
-    if not dry_run and match.empty:
-        start_bq = datetime.datetime.now()
-        n = math.ceil(result.total_rows / page_size)
-        log.info(f"[BQ] {date_or_billing_lab} - Extracted BQ table is too large ({result.total_rows} rows) - read table in chunks. Total {n} chunks")
-        
-        lst = []
-        for partial_df in result.to_dataframe_iterable():
-            if len(lst) % 10 == 0:
-                log.info(f"[BQ] {date_or_billing_lab} - {len(lst)} pages processed out of {n}")
-            lst.append(partial_df)
-        df = pd.concat(lst)
-        
-        end_bq = datetime.datetime.now()
-        log.info(f"[BQ] {date_or_billing_lab} - Total processing time: {round((end_bq - start_bq).seconds / 60, 2)} mins")
-        # df = q.to_dataframe()
-            
-        # filter by invoice month
-        ids = df['invoice'].apply(lambda x: x['month'] == invoice_month)
-        df = df[ids]
-        if not df.empty:
-            df = df.reset_index(drop=True) 
-    else:
-        fout = list(match['full_path'])[0]
-    
-    return b, p, df, fout
+    return q
 
 def get_month_last_day(year, month):
     '''Get last day of the given month in a given year'''
@@ -238,18 +196,16 @@ def multiproc_wrapper(args):
     ''' Multiproc wrapper function '''
     
     try:
-        res = process_query(*args)
+        res = process_batch(*args)
     except Exception as e:
         log.error(f'ERROR while processing batch {args[0]}: {e}')
         return None
     else:
         return res
 
-def save_df(lst, name, dirout):
+def save_df(df, name, dirout):
     '''Save date report'''
-
-    cols = [lst[i].keys() for i,e in enumerate(lst) if len(lst[i]) > 0][0]
-    df = pd.DataFrame.from_records(lst, columns=cols)
+    
     fname = re.sub('[^A-Za-z0-9]+', "_", name.lower())
     fout = os.path.join(dirout, f'{fname}.csv')
     if df is not None:
@@ -257,48 +213,58 @@ def save_df(lst, name, dirout):
     
     return fout
 
-def process_query(i, query, date_or_billing_lab, date_or_billing_lab_name, 
-                  invoice_month, project_id, dry_run, tmpfile, dirout, prev_lookup):
-    '''Process single date query to extract labeled/unlabeled/wbs sums'''
+def filter_by_invoice_month(df, invoice_month):
+    '''Filter by invoice month'''
     
-    s = datetime.datetime.now()
-    log.info(f"Batch {i}: Start processing {date_or_billing_lab}" )
+    ids = df['invoice'].apply(lambda x: x['month'] == invoice_month)
+    df = df[ids]
+    if not df.empty:
+        df = df.reset_index(drop=True) 
     
-    # get client
+    return df
+
+def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chunk_size, dirout):
+    '''Process single batch yquery to extract labeled/unlabeled/wbs sums'''
+
     client = bigquery.Client(project=project_id)
-    
-    # fetch data from the BQ
-    billed, processed, df, fout = run_query(
-        date_or_billing_lab, query, client, invoice_month, prev_lookup, dry_run
-    )
-    
-    # append the line to the report
-    with open(tmpfile, 'a') as f:
-        f.write(f"{date_or_billing_lab}\t{processed}\t{billed}\n")
+    r = run_query(q, client, dry_run = False)
+    bq_result = r.result(page_size=chunk_size)
+    billed = 0 if r.total_bytes_billed is None else r.total_bytes_billed
+    log.info(f"Batch {batch_id}: {name} - bytes billed: {billed} ({round(billed * 1e-09, 4)} GB)")
+
+    s = datetime.datetime.now()
+    log.info(f"Batch {batch_id}: Start processing {name}" )
     
     # unnest billing label and aggreagate data by project_id
-    pid_error = []
-    if df is not None and fout is None:
-        log.info(f"Batch {i}: {date_or_billing_lab} - process obtained rows." )
-        if not df.empty:
-            res = unnest_labels(df)
-            log.info(f"Batch {i}: {date_or_billing_lab} - unnested the labels" )
-            aggr, pid_error = aggregate_by_project(
-                res, 
-                date_or_billing_lab_name, 
-                date_or_billing_lab
-            )
-            log.info(f"Batch {i}: {date_or_billing_lab} - aggregated" )
-            fout = save_df(aggr, date_or_billing_lab, dirout)
-            log.info(f"Batch {i}: {date_or_billing_lab} - saved to {dirout}" )
-    else:
-        log.info(f"Batch {i}: {date_or_billing_lab} - getting previously saved data from {fout}" )
+    df_list = []
+    tot_pages = math.ceil(bq_result.total_rows / chunk_size)
+    for df in bq_result.to_dataframe_iterable():
         
+        if len(df_list) % 50 == 0:
+            log.info( f"Batch {batch_id}: {name} - Processed {len(df_list)} pages out of {tot_pages}" )
+        
+        if not df.empty:
+            df = filter_by_invoice_month(df, invoice_month)
+            df = unnest_labels(df)
+            aggr = aggregate_by_project(df, fetch_type, name)
+            df_list.append(aggr)
+        
+    # aggregate data between the chunks using project_id column   
+    log.info( f"Batch {batch_id}: {name} - data unnested and aggregated" )
+    combined = pd.DataFrame(flatten(df_list)) 
     e = datetime.datetime.now()
-    log.info(f"Batch {i}: {date_or_billing_lab} " + \
-             f"proccessing finished in {round((e - s).seconds / 60, 2)} mins" )
+    log.info( f"Batch {batch_id}: {name} - proccessing finished in {round((e - s).seconds / 60, 2)} mins" )
     
-    return pid_error, fout
+    if combined.empty:
+        log.info( f"Batch {batch_id}: {name} - no entries for a given invoice month were found" )
+        return None, billed
+    
+    # save all processed data
+    res = aggregate_by_attribute(combined, 'project_id')        
+    fout = save_df(res, name, dirout)
+    log.info( f"Batch {batch_id}: {name} - saved to {fout}" )
+    
+    return fout, billed
 
 def create_tmp_dir(dirout, invoice_month):
     ts = datetime.datetime.now().strftime("%d%m%YT%H%M%S")
@@ -307,38 +273,33 @@ def create_tmp_dir(dirout, invoice_month):
         os.makedirs(tmp) 
     return tmp
 
-def summarize_costs(l, labels = ['GCP projects', 'Billing Label', 'WBS']):
+def summarize_costs_info(l, labels = ['GCP projects', 'Billing Label', 'WBS']):
     '''Summarize costs per each label'''
-    log.info("\nTotals:")
+    
     for i in range(len(labels)):
         by = labels[i]
         tot = l[i]['total'][l[i]['total'] != ''].iloc[0]
         log.info(f'\t{f"Total costs ({by}):".ljust(NCHARS)}{tot}')
 
-def summarize_bq_costs(summary_file):
-    
-    log.info('\n' + ('').center(50, '='))
-    log.info('SCANNING IS COMPLETED')
-    
-    # read file with collected costs
-    x = pd.read_csv(summary_file, sep="\t", header=0)
-    
-    total_processed_gb = round(sum(x['BQ_PROCESSED_BYTES']) * 1e-9, 2)
-    total_billed_gb = round(sum(x['BQ_BILLED_BYTES']) * 1e-9, 2)
-    total_processed_tb = sum(x['BQ_PROCESSED_BYTES']) * 1e-12
-    total_billed_tb = sum(x['BQ_BILLED_BYTES']) * 1e-12
-    
-    total_processed_cost = total_processed_tb * 5
-    total_billed_cost = float(total_billed_tb) * 5
-    
-    log.info(f'\n{"(BQ) Total data processed:".ljust(NCHARS)}{total_processed_gb} GB')
-    log.info(f'{"(BQ) Total data billed:".ljust(NCHARS)}{total_billed_gb} GB')
-    log.info(f'{"(BQ) Estimated compute cost of queries:".ljust(NCHARS)}{total_processed_cost} $')
-    log.info(f'{"(BQ) Billed compute cost of queries:".ljust(NCHARS)}{total_billed_cost} $\n')
+def summarize_bq_costs_info(b, label = 'processed'):
+    '''Summarize BQ processing costs per each billing label'''
 
-def unique_list(l):
+    total_gb = round(sum(b) * 1e-9, 2)
+    total_tb = sum(b) * 1e-12
+    total_cost = total_tb * 5
+    
+    log.info(f'{f"(BQ) Total data {label}:".ljust(NCHARS)}{total_gb} GB ({total_tb}TB)')
+    if label == 'billed':
+        log.info(f'{"(BQ) Billed compute cost of queries:".ljust(NCHARS)}{total_cost} $\n')
+    else:
+        log.info(f'{"(BQ) Estimated compute cost of queries:".ljust(NCHARS)}{total_cost} $\n')
+
+def unique_list(l, sort = False):
     '''Get unique elements in array preserving the order'''
-    return list(dict.fromkeys(l))
+    if sort:
+        return list(set(l))
+    else:
+        return list(dict.fromkeys(l))
 
 def aggregate_by_attribute(df, by = 'project_id', drop_cols=[]):
     '''Aggreagate data across dates'''
@@ -349,7 +310,7 @@ def aggregate_by_attribute(df, by = 'project_id', drop_cols=[]):
     cols_calc.append(by)
     
     res = pd.concat([
-        df[cols_summarize].groupby(by).agg(lambda x: ';'.join(unique_list(list(x)))),
+        df[cols_summarize].groupby(by).agg(lambda x: ';'.join(unique_list(list(x), sort = True))),
         df[cols_calc].groupby(by).sum()
     ], axis = 1)
     
@@ -369,78 +330,69 @@ def aggregate_by_attribute(df, by = 'project_id', drop_cols=[]):
     
     return res
 
-def exclude_umbigous_records(df, edf):
-    '''Exclude umbigous records (e.g. one project id and multiple labels) before summarizing final costs'''
+def remove_project_wt_multiple_billing_labels(df, exclude_projects):
+    ''' Remove projects that had multiple billing labels in the BQ before summarizing final costs
+        If projects with errors were observed, exclude them altogether '''
     
-    # colnames
-    bl = 'billing_label'
-    pid = 'project_id'
-    wbs = 'wbs'
-    sep = '\n\t- '
+    ids_exclude = df['project_id'].apply(lambda x: exclude_projects_list.count(x) != 0)
+    df_exclude = df[ids_exclude].copy()
+    df_exclude = df_exclude.reset_index(drop=True)
     
-    # exclude projects with umbigous multiple lables in wbs/billing label
-    # in addition, drop the whole billing label/wbs
-    ex_projects = unique_list(edf[pid])    
+    # aggregate by attribute
+    df_exclude_aggr = aggregate_by_attribute(df_exclude, by = 'project_id', drop_cols=['date'])
     
-    bildup = edf[bl].duplicated()
-    ex_billing_labs = flatten(edf[bl][~bildup].apply(lambda x: x.split(';')).values)
-    
-    wbsdup = edf[wbs].duplicated()
-    ex_wbs = flatten(edf[wbs][~wbsdup].apply(lambda x: x.split(';') ).values)
-    
-    lw = "(labels: '" + edf[bl] + "' wbs: '" + edf[wbs]+ "')"
-    erlist = sep + sep.join(edf[pid] + lw)
-    log.error(f"\n{len(edf)} projects with multiple billing " +
-        f"labels - exclude project(s) from the report: {erlist}")
-    
-    # remove rows with pid/billing lab/wbs fror error list
-    ids = df.apply(
-        lambda x: x.loc[pid] in ex_projects or x.loc[wbs] in ex_wbs \
-            or x.loc[bl] in ex_billing_labs, axis=1)
-    
-    df_excluded = df[ids]
-    df_excluded = df_excluded.reset_index(drop=True)
-    
-    df_filt = df[~ids]
+    df_filt = df[~ids_exclude]
     df_filt = df_filt.reset_index(drop=True)
     
-    return df_filt, df_excluded
-
-
-def combine_dates(files, metadata, err_df):
-    '''Read files per date, combine and aggregate data per project/billing label/wbs'''
+    if len(exclude_projects) > 0:
+        log.warning(f"{len(exclude_projects)} projects with multiple billing / wbs labels found - exclude from the main report.\n")
     
-    # combine
+    return df_filt, df_exclude_aggr
+
+def get_projects_with_errors(df):    
+    if df.empty:
+        return []
+    grouped = df.groupby(df['project_id'])
     l = []
-    log.info("\nStarting to combine data across the dates.")
+    for p in grouped.groups.keys():
+        d = grouped.get_group(p)
+        if len(set(d['billing_label'])) > 1 or len(set(d['wbs'])) > 1:
+            l.append(p)
+    return unique_list(l)
+
+def combine_reports(files):
+    '''Read files per date/billing label'''
+    
+    empty = pd.DataFrame()
+    l = []
+    log.info("Starting to combine data across the dates.")
     for i,f in enumerate(files):
-        log.info(f"\tCombine file {i} to the final table: {f}")
-        x = pd.read_csv(f, sep='\t', header=0,
-                        dtype={'wbs': 'string','billing_label': 'string'})
+        log.info(f"Combine file {i} to the final table: {f}")
+        x = pd.read_csv(f, sep='\t', header=0, dtype={'wbs': 'string','billing_label': 'string'})
         l.append(x)
     
-    combined = pd.concat(l)
-    combined = combined.fillna('')
-    
-    # if projects with errors were observed, exclude them altogether
-    if not err_df.empty:
-        combined, excluded = exclude_umbigous_records(combined, err_df)
-        
-        # aggregate per attribute
-        pr_excluded = aggregate_by_attribute(
-            excluded, by = 'project_id', drop_cols=['date']
-        )
+    if len(l) > 0:
+        combined = pd.concat(l)
     else:
-        pr_excluded = pd.DataFrame()
+        combined = pd.DataFrame()
+    
+    combined = combined.fillna('')
+    exclude_projects = get_projects_with_errors(combined)
+    
+    return combined, exclude_projects
+    
+def aggregate_and_prepare_excel_sheets(df, metadata):
+    ''' Remove those project that had multiple billing labels in the BQ
+        If projects with errors were observed, exclude them altogether '''
     
     # match the description
     metadata = md.copy()
-
-    if 'description' not in combined.columns:
+    
+    if 'description' not in df.columns:
         metadata['billing_label'] = 'billing_' + metadata['label']
         metadata.index = metadata['billing_label']
         
-        d = list(set(combined['billing_label']).difference(
+        d = list(set(df['billing_label']).difference(
             set(metadata['billing_label'])))
         v = [pd.NA] * len(d)    
         add = pd.DataFrame(list(zip(v, v, d)), 
@@ -448,31 +400,29 @@ def combine_dates(files, metadata, err_df):
                            index=d)
         
         metadata = pd.concat([metadata, add])
-        combined['description'] = metadata.loc[combined['billing_label']]['description'].values
+        df['description'] = metadata.loc[df['billing_label']]['description'].values
     
-    # aggregate per attribute
+    # aggregate by attribute
     pr = aggregate_by_attribute(
-        combined, by = 'project_id', drop_cols=['date']
+        df, by = 'project_id', drop_cols=['date']
     )
     lab = aggregate_by_attribute(
-        combined, by = 'billing_label', drop_cols=['date']
+        df, by = 'billing_label', drop_cols=['date']
     )
     wbs = aggregate_by_attribute(
-        combined, by = 'wbs', drop_cols=['date']
+        df, by = 'wbs', drop_cols=['date']
     )
     
     # append total to project
-    res = []
+    result = []
     for t in [pr, lab, wbs]:
         t['total'] = [''] * len(t)
         t['total'][len(t)-1] = t['total_cost'].sum()
-        res.append(t)
+        result.append(t)
     
-    pr_excluded.rename(columns={'billing_label': 'billing_label(s)', 'wbs': 'wbs(s)'})
+    return result
 
-    return res, pr_excluded
-
-def save_excel(df_list, invoice_month, dirout, mode):
+def save_result_to_excel(df_list, invoice_month, dirout, mode):
     ''' Save dataframes to the excel file'''
     
     fname = f"report_{invoice_month}_{mode}.xlsx"
@@ -481,13 +431,13 @@ def save_excel(df_list, invoice_month, dirout, mode):
         df_list[0].to_excel(writer, sheet_name="by GCP project", index=False)
         df_list[1].to_excel(writer, sheet_name="by billing label", index=False)
         df_list[2].to_excel(writer, sheet_name="by WBS", index=False)
-        log.info(f'\nSaved report to {fout}')
+        log.info(f'Saved report to {fout}\n')
 
 def flatten(l):
     flat_list = [item for sublist in l for item in sublist]
     return flat_list
 
-def get_metadata(bucket_name, m_filename):
+def get_metadata_from_bucket(bucket_name, m_filename):
     '''Get metadata file from the GCS bucket'''
     
     try:    
@@ -504,21 +454,20 @@ def get_metadata(bucket_name, m_filename):
         log.info('Succesfully read metadata file')
         return dat
 
-def save_err(df_excluded, df_errors, dirout, mode):
+def save_errors_to_excel(df_excluded, dirout, mode):
     '''Save errors into a separate excel file'''
     
     fname = f"report_{invoice_month}_{mode}_ERRORS.xlsx"
     fout = os.path.join(dirout, fname)
-    
-    # summarize
-    billing_label = []
-    if not df_errors.empty:
-        billing_label = unique_list(flatten(list(df_errors['billing_label'].apply(lambda x: x.split(';')).values)))
-    
+
+    billing_label = unique_list(flatten([e.split(';') for e in set(df_excluded['billing_label'])]))
+    wbs = unique_list(flatten([e.split(';') for e in set(df_excluded['wbs'])]))
+
     # save to a separte report
     with pd.ExcelWriter(fout) as writer:
         df_excluded.to_excel(writer, sheet_name="excluded from report(by proj)", index=False)
         pd.DataFrame({'billing_label': billing_label}).to_excel(writer, sheet_name="excluded billing labels", index=False)
+        pd.DataFrame({'wbs': wbs}).to_excel(writer, sheet_name="excluded wbs", index=False)
         log.info(f'\nSaved report to {fout}')
 
 def remove_temp_files(dir):
@@ -530,17 +479,81 @@ def remove_temp_files(dir):
 def list_full_paths(directory):
     return [os.path.join(directory, file) for file in os.listdir(directory)]
 
-def check_prev_runs(dirout):
+def get_prev_runs(dirout, dirout_root, names):
+    ''' Get a list of files from previous runs '''
+    
     pattern = os.path.basename(dirout).split('_')[0]
     dir_list = []
-    for f in os.listdir(args.dirout):
+    for f in os.listdir(dirout_root):
         if pattern in f:
-            dir_list.append(os.path.join(args.dirout, f))
+            dir_list.append(os.path.join(dirout_root, f))
     files_full = flatten([list_full_paths(d) for d in dir_list if os.path.isdir(d)])
     file_bn =  [os.path.basename(f) for f in files_full]
-    dff = pd.DataFrame({'full_path': files_full, 'basename': file_bn})
-    dff = dff[~dff['basename'].duplicated()] 
-    return dff
+    df = pd.DataFrame({'path': files_full, 'basename': file_bn})
+    df = df[~df['basename'].duplicated()] 
+    
+    names_ = [re.sub('[^A-Za-z0-9]+', "_", n.lower()) for n in names]
+    names_err_ = [re.sub('[^A-Za-z0-9]+', "_", n.lower()) + '_errors' for n in names]
+    ids = df['basename'].apply(lambda x: x.replace('.csv', '') in names_ or x.replace('.csv', '') in names_err_ )
+    df = df[ids]
+    df = df.reset_index(drop = True)
+    
+    return df
+
+def prepare_queiries(args, md):
+    ''' Prepare a list of queries '''
+    
+    t_name = f"{args.project_id}.{args.dataset_id}.{args.table_id}"
+    
+    if args.mode == 'full':
+        dates = get_dates(args.year, args.month)
+        queries = [get_query(t_name, d) for d in dates]
+        names = [dates[i] for i, q in enumerate(queries)]
+    else:
+        prev_month_last_day = get_month_last_day(args.year, args.month - 1)
+        start = f'{args.year}-{(args.month - 1):02d}-{prev_month_last_day:02d}'
+        end = f'{args.year}-{(args.month + 1):02d}-01'        
+        queries = [get_query_billing_label(t_name, start, end, md['label'].iloc[i]) for i in range(md.shape[0])]
+        names = [md.iloc[i]['description'] for i, q in enumerate(queries)]
+    
+    return queries, names
+
+def prepare_batches(args, queries, names, lookup, dirout):
+    '''Prepare batches to be processed in parallel'''
+    
+    fetch_type = 'date' if args.mode == 'full' else 'description'
+    
+    batches = []
+    prev_runs = []
+    total_bytes_processed = []
+
+    for i,q in enumerate(queries):
+        if args.check_prev_runs and not args.dry_run:
+            pattern = re.sub('[^A-Za-z0-9]+', "_", names[i].lower())
+            prev = lookup[lookup['basename'].apply(lambda x: pattern + '.csv' == x)]
+            if not prev.empty:
+                fname = list(prev['path'])[0]
+                prev_runs.append(fname)
+                log.info(f'Found previously saved result for {names[i]} - use it {fname}')
+            continue
+        
+        r = run_query(q, client, dry_run = True)
+        p = 0 if r.total_bytes_processed is None else  r.total_bytes_processed
+        log.info(f"[BQ] {names[i]} - bytes processed: {p} ({round(p * 1e-09, 4)} GB)")
+
+        # get batches construct
+        batches.append((q, client.project, i, names[i], fetch_type, invoice_month, args.chunk_size, dirout))
+        
+        total_bytes_processed.append(p)
+    
+    if args.check_prev_runs:
+        reuse = [f for f in set(list(lookup['basename']))]
+    else:
+        reuse = []
+        
+    log.info(f"In total {len(batches)} batches prepared for processing - found {len(reuse)} reports from previous runs to reuse.")
+    
+    return batches, prev_runs, total_bytes_processed
 
 def parse_args():
     ''' Parse arguments '''
@@ -585,9 +598,18 @@ def parse_args():
                         help='Extract metadata from the given bucket omiting gs:// prefix.')
     
     parser.add_argument('-r', '--remove', dest='remove', required=False,
-                        default=True, type=str2bool,
+                        default=False, type=str2bool,
                         help="Remove temporary files that are used for creating a final report (e.g. extracted costs per day/billing label. " + \
                             "These will be saved to invoice<YEARMONTH>_ts_<TIMESTAMP> under the dirout folder)")
+
+    parser.add_argument('-c', '--max-cpu', dest='max_cpu', required=False, 
+                        default=6, type=int, help="Max cpu to use.")
+
+    parser.add_argument('-n', '--chunk-size', dest='chunk_size', required=False, default=10000, type=int, 
+                        help="When the table is too large - extract data in chuncks of this size.")
+
+    parser.add_argument('-check', '--check-prev-runs', dest='check_prev_runs', required=False,
+                        default=False, type=str2bool, help="Check previous runs")
 
     args = parser.parse_args()
     return args
@@ -597,87 +619,68 @@ if __name__ == '__main__':
 
     args = parse_args()
     
+    print('\n' + ('').center(80, '='))
+
     start_ts = datetime.datetime.now()
     log.info("STARTING BILLING REPORT PREPARATION\n")
 
     # inititalize invoice month, bq table name and bq client
+    client = bigquery.Client(project=args.project_id)
     invoice_month = f'{args.year}{args.month:02d}'
-    t_name = f"{args.project_id}.{args.dataset_id}.{args.table_id}"
 
-    # read metadata from the bucket
-    md = get_metadata(args.bucket, args.metadata)
+    md = get_metadata_from_bucket(args.bucket, args.metadata)
     
-    # create tmp dir and tmp file for storing daily data and bq costs per query
     dirout = create_tmp_dir(args.dirout, invoice_month) if not args.dry_run else ''
-    tmpfile = tempfile.NamedTemporaryFile(prefix='_bqcosts_', dir=args.dirout)
 
-    lookup = check_prev_runs(dirout)
+    queries, names = prepare_queiries(args, md)
     
-    with open(tmpfile.name, 'w') as f:
-        _ = f.write(f"DATE\tBQ_PROCESSED_BYTES\tBQ_BILLED_BYTES\n")
+    lookup = get_prev_runs(dirout, args.dirout, names) if args.check_prev_runs else pd.DataFrame()
 
-    # if full mode - generate queries to extract data for each day
-    if args.mode == 'full':
+    batches_list = prepare_batches(args, queries, names, lookup, dirout)
 
-        # get dates
-        dates = get_dates(args.year, args.month)
-        
-        # get queries
-        queries = [get_query(t_name, d) for d in dates]
-        
-        # get batches
-        batches = [(i, q, dates[i], 'date', invoice_month, args.project_id, 
-                    args.dry_run, tmpfile.name, dirout, lookup) for i, q in enumerate(queries)]
-    
-    # else generate queries to extract data per billing label
-    else:
-
-        # get start & end dates
-        prev_month_last_day = get_month_last_day(args.year, args.month - 1)
-        start = f'{args.year}-{(args.month - 1):02d}-{prev_month_last_day:02d}'
-        end = f'{args.year}-{(args.month + 1):02d}-01'        
-        
-        # get queries
-        queries = [get_query_billing_label(t_name, start, end, md['label'].iloc[i]) for i in range(md.shape[0])]
-        
-        # get batches
-        batches = [(i, q, md.iloc[i]['description'], 'description', invoice_month, 
-                    args.project_id, args.dry_run, tmpfile.name, dirout, lookup) for i, q in enumerate(queries)]
-    
-    log.info(f"Prepared {len(batches)} batches to process - will reuse {lookup.shape[0]} files. Remaining: {len(batches) - lookup.shape[0]}")
-        
-    # process batches in parallel
-    # batches = batches[1:5]
-    cpus = multiprocessing.cpu_count()
-    with Pool(processes=cpus) as pool:
-        e, saved_files = zip(*pool.map(multiproc_wrapper, batches))
-        df_errors = pd.DataFrame(e)
-        files_out = [f for f in saved_files if f is not None]
-    
-    # aggregate data and 
+    # process batches in parallel if not dry run
+    total_billed = [0]
     if not args.dry_run:
 
-        # combine across the dates
-        result, df_excluded = combine_dates(files_out, md, df_errors)
+        summarize_bq_costs_info(batches_list[2], 'processed')
 
-        # remove temp files if needed
+        cpus = min(args.max_cpu, multiprocessing.cpu_count())
+        log.info(f"Using {cpus} CPUs.")
+        with Pool(processes=cpus) as pool:
+            results = pool.map(multiproc_wrapper, batches_list[0])
+            reports, total_billed =  zip(*pool.map(multiproc_wrapper, batches_list[0]))
+
+            # filter out nones
+            reports = [f for f in reports if f is not None]
+
+            # combine files from previous and current runs
+            reports_all = reports + batches_list[1]
+        
+        # prepare finale repors
+        df_report, exclude_projects_list = combine_reports(reports_all)
+
+        df_report, df_excluded = remove_project_wt_multiple_billing_labels(
+            df_report, exclude_projects_list
+        )
+
+        result = aggregate_and_prepare_excel_sheets(df_report, md)
+
+        save_result_to_excel(result, invoice_month, dirout, args.mode)
+        if not df_excluded.empty:
+            save_errors_to_excel(df_excluded, dirout, args.mode)
+
+        summarize_costs_info(result)
+        
         if args.remove:
             remove_temp_files(dirout)
-
-        # save to excel
-        save_excel(result, invoice_month, dirout, args.mode)
-
-        # save errors separately
-        save_err(df_excluded, df_errors, dirout, args.mode)
-
-        # summarize costs
-        summarize_costs(result)
     
-    # summarize BQ costs
-    summarize_bq_costs(tmpfile.name)
+    print('\n' + ('').center(80, '='))
+    log.info('SCANNING IS COMPLETED')
 
-    # print total processing time
+    summarize_bq_costs_info(batches_list[2], 'processed')
+    summarize_bq_costs_info(total_billed, 'billed')
+    
     dt = round((datetime.datetime.now() - start_ts).seconds/ 60, 2)
-    log.info(f"\nTotal processing time: {dt} mins")
+    log.info(f"Total processing time: {dt} mins")
 
 
