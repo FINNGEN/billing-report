@@ -360,8 +360,8 @@ def get_projects_with_errors(df):
     for p in grouped.groups.keys():
         d = grouped.get_group(p)
         if len(set(d['billing_label'])) > 1 or len(set(d['wbs'])) > 1:
-            lab.append(unique(d['billing_label']))
-            wbs.append(unique(d['wbs']))
+            lab.append(unique_list(d['billing_label']))
+            wbs.append(unique_list(d['wbs']))
     
     ids = df.apply(lambda x: flatten(lab).count(x['billing_label']) > 0 or flatten(wbs).count(x['wbs']) > 0, axis = 1)
     projects = unique_list(df[ids]['project_id'])
