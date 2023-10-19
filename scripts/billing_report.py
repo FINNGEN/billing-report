@@ -230,10 +230,11 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
     r = run_query(q, client, dry_run = False)
     bq_result = r.result(page_size=chunk_size)
     billed = 0 if r.total_bytes_billed is None else r.total_bytes_billed
-    log.info(f"Batch {batch_id}: {name} - bytes billed: {billed} ({round(billed * 1e-09, 4)} GB)")
+    batch_id_formatted = "{:02d}".format(batch_id)
+    log.info(f"Batch {batch_id_formatted}: {name} - bytes billed: {billed} ({round(billed * 1e-09, 4)} GB)")
 
     s = datetime.datetime.now()
-    log.info(f"Batch {batch_id}: Start processing {name}" )
+    log.info(f"Batch {batch_id_formatted}: Start processing {name}" )
     
     # unnest billing label and aggreagate data by project_id
     df_list = []
@@ -241,7 +242,7 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
     for df in bq_result.to_dataframe_iterable():
         
         if len(df_list) % 50 == 0:
-            log.info( f"Batch {batch_id}: {name} - Processed {len(df_list)} pages out of {tot_pages}" )
+            log.info( f"Batch {batch_id_formatted}: {name} - Processed {len(df_list)} pages out of {tot_pages}" )
         
         if not df.empty:
             df = filter_by_invoice_month(df, invoice_month)
@@ -250,19 +251,19 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
             df_list.append(aggr)
         
     # aggregate data between the chunks using project_id column   
-    log.info( f"Batch {batch_id}: {name} - data unnested and aggregated" )
+    log.info( f"Batch {batch_id_formatted}: {name} - data unnested and aggregated" )
     combined = pd.DataFrame(flatten(df_list)) 
     e = datetime.datetime.now()
-    log.info( f"Batch {batch_id}: {name} - proccessing finished in {round((e - s).seconds / 60, 2)} mins" )
+    log.info( f"Batch {batch_id_formatted}: {name} - proccessing finished in {round((e - s).seconds / 60, 2)} mins" )
     
     if combined.empty:
-        log.info( f"Batch {batch_id}: {name} - no entries for a given invoice month were found" )
+        log.info( f"Batch {batch_id_formatted}: {name} - no entries for a given invoice month were found" )
         return None, billed
     
     # save all processed data
     res = aggregate_by_attribute(combined, 'project_id')        
     fout = save_df(res, name, dirout)
-    log.info( f"Batch {batch_id}: {name} - saved to {fout}" )
+    log.info( f"Batch {batch_id_formatted}: {name} - saved to {fout}" )
     
     return fout, billed
 
@@ -279,7 +280,7 @@ def summarize_costs_info(l, labels = ['GCP projects', 'Billing Label', 'WBS']):
     for i in range(len(labels)):
         by = labels[i]
         tot = l[i]['total'][l[i]['total'] != ''].iloc[0]
-        log.info(f'\t{f"Total costs ({by}):".ljust(NCHARS)}{tot}')
+        log.info(f'{f"Total costs ({by}):".ljust(NCHARS)}{tot}')
 
 def summarize_bq_costs_info(b, label = 'processed'):
     '''Summarize BQ processing costs per each billing label'''
@@ -288,7 +289,7 @@ def summarize_bq_costs_info(b, label = 'processed'):
     total_tb = sum(b) * 1e-12
     total_cost = total_tb * 5
     
-    log.info(f'{f"(BQ) Total data {label}:".ljust(NCHARS)}{total_gb} GB ({total_tb}TB)')
+    log.info(f'{f"(BQ) Total data {label}:".ljust(NCHARS)}{total_gb} GB ({total_tb} TB)')
     if label == 'billed':
         log.info(f'{"(BQ) Billed compute cost of queries:".ljust(NCHARS)}{total_cost} $\n')
     else:
@@ -647,7 +648,6 @@ if __name__ == '__main__':
         cpus = min(args.max_cpu, multiprocessing.cpu_count())
         log.info(f"Using {cpus} CPUs.")
         with Pool(processes=cpus) as pool:
-            results = pool.map(multiproc_wrapper, batches_list[0])
             reports, total_billed =  zip(*pool.map(multiproc_wrapper, batches_list[0]))
 
             # filter out nones
