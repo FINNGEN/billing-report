@@ -335,7 +335,7 @@ def remove_project_wt_multiple_billing_labels(df, exclude_projects):
     ''' Remove projects that had multiple billing labels in the BQ before summarizing final costs
         If projects with errors were observed, exclude them altogether '''
     
-    ids_exclude = df['project_id'].apply(lambda x: exclude_projects_list.count(x) != 0)
+    ids_exclude = df['project_id'].apply(lambda x: exclude_projects.count(x) != 0)
     df_exclude = df[ids_exclude].copy()
     df_exclude = df_exclude.reset_index(drop=True)
     
@@ -354,12 +354,19 @@ def get_projects_with_errors(df):
     if df.empty:
         return []
     grouped = df.groupby(df['project_id'])
-    l = []
+    
+    lab = []
+    wbs = []
     for p in grouped.groups.keys():
         d = grouped.get_group(p)
         if len(set(d['billing_label'])) > 1 or len(set(d['wbs'])) > 1:
-            l.append(p)
-    return unique_list(l)
+            lab.append(unique(d['billing_label']))
+            wbs.append(unique(d['wbs']))
+    
+    ids = df.apply(lambda x: flatten(lab).count(x['billing_label']) > 0 or flatten(wbs).count(x['wbs']) > 0, axis = 1)
+    projects = unique_list(df[ids]['project_id'])
+    
+    return projects
 
 def combine_reports(files):
     '''Read files per date/billing label'''
