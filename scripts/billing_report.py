@@ -185,7 +185,7 @@ def get_dates(start, end):
     dates = []
     while start_dt <= end_dt:
         # add current date to list by converting  it to iso format
-        dates.append(d.isoformat())
+        dates.append(start_dt.isoformat())
         
         # increment start date by timedelta
         d += delta
