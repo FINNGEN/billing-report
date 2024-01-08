@@ -188,7 +188,7 @@ def get_dates(start, end):
         dates.append(start_dt.isoformat())
         
         # increment start date by timedelta
-        d += delta
+        start_dt += delta
 
     log.info(f"Total dates {len(dates)}")    
     
