@@ -112,13 +112,13 @@ def run_query(query, client, dry_run=False):
     
     return q
 
-def get_month_last_day(year, month):
+def get_prev_month_last_day(year, month):
     '''Get last day of the given month in a given year'''
     
     cal = calendar.monthcalendar(year, month)
     days = [d for w in cal for d in w  if d != 0]
     days.reverse()
-    end = days[0]
+    end = days[1]
     
     return end
 
@@ -172,23 +172,25 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
-def get_dates(year, month):
+def get_dates(start, end):
     '''Get dates in a month with 1 day overlap from prev/next months'''
     
-    start_day = get_month_last_day(year, month - 1)
-    start_dt = date(year, month-1, start_day)
-    end_dt = date(year, month+1, 1)
     delta = timedelta(days=1)
+    start_dt = datetime.datetime.strptime(start, '%Y-%m-%d')
+    end_dt = datetime.datetime.strptime(end, '%Y-%m-%d')
+
+    log.info(f"Start date: {start_dt}, end date: {end_dt}")    
     
-    # store the dates between two dates in a list
+    # store dates between the two dates in a list
     dates = []
-    
     while start_dt <= end_dt:
         # add current date to list by converting  it to iso format
-        dates.append(start_dt.isoformat())
+        dates.append(d.isoformat())
         
         # increment start date by timedelta
-        start_dt += delta
+        d += delta
+
+    log.info(f"Total dates {len(dates)}")    
     
     return dates
 
@@ -231,6 +233,7 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
     bq_result = r.result(page_size=chunk_size)
     billed = 0 if r.total_bytes_billed is None else r.total_bytes_billed
     batch_id_formatted = "{:02d}".format(batch_id)
+    total_rows_processed = bq_result.total_rows
     log.info(f"Batch {batch_id_formatted}: {name} - bytes billed: {billed} ({round(billed * 1e-09, 4)} GB)")
 
     s = datetime.datetime.now()
@@ -258,14 +261,14 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
     
     if combined.empty:
         log.info( f"Batch {batch_id_formatted}: {name} - no entries for a given invoice month were found" )
-        return None, billed
+        return None, billed, total_rows_processed
     
     # save all processed data
     res = aggregate_by_attribute(combined, 'project_id')        
     fout = save_df(res, name, dirout)
     log.info( f"Batch {batch_id_formatted}: {name} - saved to {fout}" )
     
-    return fout, billed
+    return fout, billed, total_rows_processed
 
 def create_tmp_dir(dirout, invoice_month):
     ts = datetime.datetime.now().strftime("%d%m%YT%H%M%S")
@@ -512,15 +515,26 @@ def prepare_queiries(args, md):
     ''' Prepare a list of queries '''
     
     t_name = f"{args.project_id}.{args.dataset_id}.{args.table_id}"
+
+    # start
+    if args.month == 1:
+        start = f'{args.year-1}-12-{prev_month_last_day:02d}'
+    else: 
+        prev_month_last_day = get_prev_month_last_day(args.year, args.month - 1)
+        start = f'{args.year}-{(args.month - 1):02d}-{prev_month_last_day:02d}'
     
+    # end
+    if args.month == 12:
+        end = f'{args.year+1}-{1:02d}-02'      
+    else:
+        end = f'{args.year}-{(args.month + 1):02d}-02'
+
+    # prepare queries
     if args.mode == 'full':
-        dates = get_dates(args.year, args.month)
+        dates = get_dates(start, end)
         queries = [get_query(t_name, d) for d in dates]
         names = [dates[i] for i, q in enumerate(queries)]
     else:
-        prev_month_last_day = get_month_last_day(args.year, args.month - 1)
-        start = f'{args.year}-{(args.month - 1):02d}-{prev_month_last_day:02d}'
-        end = f'{args.year}-{(args.month + 1):02d}-01'        
         queries = [get_query_billing_label(t_name, start, end, md['label'].iloc[i]) for i in range(md.shape[0])]
         names = [md.iloc[i]['description'] for i, q in enumerate(queries)]
     
@@ -648,6 +662,7 @@ if __name__ == '__main__':
 
     # process batches in parallel if not dry run
     total_billed = [0]
+    total_rows = [0]
     if not args.dry_run:
 
         summarize_bq_costs_info(batches_list[2], 'processed')
@@ -655,7 +670,7 @@ if __name__ == '__main__':
         cpus = min(args.max_cpu, multiprocessing.cpu_count())
         log.info(f"Using {cpus} CPUs.")
         with Pool(processes=cpus) as pool:
-            reports, total_billed =  zip(*pool.map(multiproc_wrapper, batches_list[0]))
+            reports, total_billed, total_rows =  zip(*pool.map(multiproc_wrapper, batches_list[0]))
 
             # filter out nones
             reports = [f for f in reports if f is not None]
@@ -684,6 +699,7 @@ if __name__ == '__main__':
     print('\n' + ('').center(80, '='))
     log.info('SCANNING IS COMPLETED')
 
+    log.info(f"(BQ) Total rows processed {sum(total_rows)}")
     summarize_bq_costs_info(batches_list[2], 'processed')
     summarize_bq_costs_info(total_billed, 'billed')
     
