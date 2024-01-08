@@ -176,12 +176,12 @@ def get_dates(start, end):
     '''Get dates in a month with 1 day overlap from prev/next months'''
     
     delta = timedelta(days=1)
-
+    
     s = datetime.datetime.strptime(start, '%Y-%m-%d')
     e = datetime.datetime.strptime(end, '%Y-%m-%d')
     start_dt = date(s.year, s.month, s.day)
     end_dt = date(e.year, e.month, e.day)
-
+    
     log.info(f"Start date %Y-%m-%d: {start_dt}, end date %Y-%m-%d: {end_dt}")    
     
     # store dates between the two dates in a list
@@ -192,7 +192,7 @@ def get_dates(start, end):
         
         # increment start date by timedelta
         start_dt += delta
-
+    
     log.info(f"Total dates {len(dates)}")    
     
     return dates
@@ -290,7 +290,7 @@ def summarize_costs_info(l, labels = ['GCP projects', 'Billing Label', 'WBS']):
 
 def summarize_bq_costs_info(b, label = 'processed'):
     '''Summarize BQ processing costs per each billing label'''
-
+    
     total_gb = round(sum(b) * 1e-9, 2)
     total_tb = sum(b) * 1e-12
     total_cost = total_tb * 5
@@ -377,7 +377,6 @@ def get_projects_with_errors(df):
 def combine_reports(files):
     '''Read files per date/billing label'''
     
-    empty = pd.DataFrame()
     l = []
     log.info("Starting to combine data across the dates.")
     for i,f in enumerate(files):
@@ -518,7 +517,7 @@ def prepare_queiries(args, md):
     ''' Prepare a list of queries '''
     
     t_name = f"{args.project_id}.{args.dataset_id}.{args.table_id}"
-
+    
     # start
     if args.month == 1:
         start = f'{args.year-1}-12-{prev_month_last_day:02d}'
@@ -531,7 +530,7 @@ def prepare_queiries(args, md):
         end = f'{args.year+1}-{1:02d}-02'      
     else:
         end = f'{args.year}-{(args.month + 1):02d}-02'
-
+    
     # prepare queries
     if args.mode == 'full':
         dates = get_dates(start, end)
@@ -551,7 +550,7 @@ def prepare_batches(args, queries, names, lookup, dirout):
     batches = []
     prev_runs = []
     total_bytes_processed = []
-
+    
     for i,q in enumerate(queries):
         if args.check_prev_runs and not args.dry_run:
             pattern = re.sub('[^A-Za-z0-9]+', "_", names[i].lower())
@@ -565,7 +564,7 @@ def prepare_batches(args, queries, names, lookup, dirout):
         r = run_query(q, client, dry_run = True)
         p = 0 if r.total_bytes_processed is None else  r.total_bytes_processed
         log.info(f"[BQ] {names[i]} - bytes processed: {p} ({round(p * 1e-09, 4)} GB)")
-
+        
         # get batches construct
         batches.append((q, client.project, i, names[i], fetch_type, invoice_month, args.chunk_size, dirout))
         
