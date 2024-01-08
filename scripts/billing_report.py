@@ -176,12 +176,13 @@ def get_dates(start, end):
     '''Get dates in a month with 1 day overlap from prev/next months'''
     
     delta = timedelta(days=1)
+
     s = datetime.datetime.strptime(start, '%Y-%m-%d')
     e = datetime.datetime.strptime(end, '%Y-%m-%d')
     start_dt = date(s.year, s.month, s.day)
     end_dt = date(e.year, e.month, e.day)
 
-    log.info(f"Start date: {start_dt}, end date: {end_dt}")    
+    log.info(f"Start date %Y-%m-%d: {start_dt}, end date %Y-%m-%d: {end_dt}")    
     
     # store dates between the two dates in a list
     dates = []
