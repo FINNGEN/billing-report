@@ -1,3 +1,3 @@
-google-cloud-bigquery[pandas]==2.34.3
-google-cloud-storage
-openpyxl
+google-cloud-bigquery[pandas]==3.14.1
+google-cloud-storage==2.14.0
+openpyxl==3.1.2
