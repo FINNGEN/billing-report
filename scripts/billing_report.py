@@ -527,9 +527,9 @@ def prepare_queiries(args, md):
     
     # end
     if args.month == 12:
-        end = f'{args.year+1}-{1:02d}-02'      
+        end = f'{args.year+1}-{1:02d}-03'      
     else:
-        end = f'{args.year}-{(args.month + 1):02d}-02'
+        end = f'{args.year}-{(args.month + 1):02d}-03'
     
     # prepare queries
     if args.mode == 'full':
