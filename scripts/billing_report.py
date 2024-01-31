@@ -78,7 +78,7 @@ def unnest_labels(df):
     
     df['billing_label'] = billing_labs
     df['wbs'] = df['billing_label'].apply(lambda x: x.split('_')[1] if x != '' in x else '')
-    
+
     return df
 
 def aggregate_by_project(df, key, value):
@@ -194,7 +194,10 @@ def get_dates(start, end):
         start_dt += delta
     
     log.info(f"Total dates {len(dates)}")    
-    
+
+
+    dates = dates[(len(dates) - 2) : len(dates)]
+
     return dates
 
 def multiproc_wrapper(args):
@@ -220,19 +223,23 @@ def save_df(df, name, dirout):
 
 def filter_by_invoice_month(df, invoice_month):
     '''Filter by invoice month'''
-    
     ids = df['invoice'].apply(lambda x: x['month'] == invoice_month)
+    df_filtered_out = df[~ids]
     df = df[ids]
+    
     if not df.empty:
         df = df.reset_index(drop=True) 
     
-    return df
+    return df, df_filtered_out
 
 def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chunk_size, dirout):
     '''Process single batch yquery to extract labeled/unlabeled/wbs sums'''
 
     client = bigquery.Client(project=project_id)
     r = run_query(q, client, dry_run = False)
+
+    partition_date = q.split('\n')[len(q.split('\n'))-2].replace(" ", "")
+
     bq_result = r.result(page_size=chunk_size)
     billed = 0 if r.total_bytes_billed is None else r.total_bytes_billed
     batch_id_formatted = "{:02d}".format(batch_id)
@@ -244,6 +251,8 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
     
     # unnest billing label and aggreagate data by project_id
     df_list = []
+    df_list_removed = []
+    df_list_raw = []
     tot_pages = math.ceil(bq_result.total_rows / chunk_size)
     for df in bq_result.to_dataframe_iterable():
         
@@ -251,11 +260,17 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
             log.info( f"Batch {batch_id_formatted}: {name} - Processed {len(df_list)} pages out of {tot_pages}" )
         
         if not df.empty:
-            df = filter_by_invoice_month(df, invoice_month)
+            df, df_removed = filter_by_invoice_month(df, invoice_month)
+            df_list_removed.append(df_removed)
+
+            df_raw = df.copy()
+
             df = unnest_labels(df)
             aggr = aggregate_by_project(df, fetch_type, name)
             df_list.append(aggr)
-        
+
+            df_list_raw.append(df_raw)
+
     # aggregate data between the chunks using project_id column   
     log.info( f"Batch {batch_id_formatted}: {name} - data unnested and aggregated" )
     combined = pd.DataFrame(flatten(df_list)) 
@@ -270,7 +285,20 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
     res = aggregate_by_attribute(combined, 'project_id')        
     fout = save_df(res, name, dirout)
     log.info( f"Batch {batch_id_formatted}: {name} - saved to {fout}" )
-    
+
+    # save extra files
+    unaggregated = pd.concat(df_list_raw)
+    unaggregated['partition_date'] = partition_date
+    unaggregated['invoice_month'] = invoice_month
+    fout_unaggregated = save_df(unaggregated, name + '_unaggreagted', dirout)
+    log.info( f"Batch {batch_id_formatted}: {name} - saved to {fout_unaggregated}" )
+
+    removed = pd.concat(df_list_removed)
+    removed['partition_date'] = partition_date
+    removed['invoice_month'] = invoice_month
+    fout_removed = save_df(removed, name + "_removed_rows", dirout)
+    log.info( f"Batch {batch_id_formatted}: {name} - REMOVED ROWS saved to {fout_removed}" )
+
     return fout, billed, total_rows_processed
 
 def create_tmp_dir(dirout, invoice_month):
