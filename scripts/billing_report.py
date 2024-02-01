@@ -11,7 +11,7 @@ import warnings
 import argparse
 import calendar
 import datetime
-import tempfile
+import textwrap
 import pandas as pd
 import multiprocessing
 from multiprocessing import Pool
@@ -101,7 +101,8 @@ def aggregate_by_project(df, key, value):
     return res
 
 def run_query(query, client, dry_run=False):
-    '''Run BQ query and return query result as dataframe, data billed / data read in GB (term - either date or a billing label)'''
+    '''Run BQ query and return query result as dataframe, data billed / 
+       data read in GB (term - either date or a billing label)'''
     
     df = pd.DataFrame()
     if dry_run:
@@ -192,11 +193,8 @@ def get_dates(start, end):
         
         # increment start date by timedelta
         start_dt += delta
-    
+
     log.info(f"Total dates {len(dates)}")    
-
-
-    dates = dates[(len(dates) - 2) : len(dates)]
 
     return dates
 
@@ -215,7 +213,7 @@ def save_df(df, name, dirout):
     '''Save date report'''
     
     fname = re.sub('[^A-Za-z0-9]+', "_", name.lower())
-    fout = os.path.join(dirout, f'{fname}.csv')
+    fout = os.path.join(dirout, f'{fname}.tsv')
     if df is not None:
         df.to_csv(fout, sep='\t', index=False)
     
@@ -232,7 +230,8 @@ def filter_by_invoice_month(df, invoice_month):
     
     return df, df_filtered_out
 
-def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chunk_size, dirout):
+def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, 
+                  chunk_size, dirout, save_raw, save_removed):
     '''Process single batch yquery to extract labeled/unlabeled/wbs sums'''
 
     client = bigquery.Client(project=project_id)
@@ -275,7 +274,7 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
     log.info( f"Batch {batch_id_formatted}: {name} - data unnested and aggregated" )
     combined = pd.DataFrame(flatten(df_list)) 
     e = datetime.datetime.now()
-    log.info( f"Batch {batch_id_formatted}: {name} - proccessing finished in {round((e - s).seconds / 60, 2)} mins" )
+    log.info(f'Batch {batch_id_formatted}: {name} - proccessing finished in {round((e - s).seconds / 60, 2)} mins' )
     
     if combined.empty:
         log.info( f"Batch {batch_id_formatted}: {name} - no entries for a given invoice month were found" )
@@ -286,18 +285,21 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
     fout = save_df(res, name, dirout)
     log.info( f"Batch {batch_id_formatted}: {name} - saved to {fout}" )
 
-    # save extra files
-    unaggregated = pd.concat(df_list_raw)
-    unaggregated['partition_date'] = partition_date
-    unaggregated['invoice_month'] = invoice_month
-    fout_unaggregated = save_df(unaggregated, name + '_unaggreagted', dirout)
-    log.info( f"Batch {batch_id_formatted}: {name} - saved to {fout_unaggregated}" )
-
-    removed = pd.concat(df_list_removed)
-    removed['partition_date'] = partition_date
-    removed['invoice_month'] = invoice_month
-    fout_removed = save_df(removed, name + "_removed_rows", dirout)
-    log.info( f"Batch {batch_id_formatted}: {name} - REMOVED ROWS saved to {fout_removed}" )
+    # save unaggregated full data
+    if save_raw:
+        unaggregated = pd.concat(df_list_raw)
+        unaggregated['partition_date'] = partition_date
+        unaggregated['invoice_month'] = invoice_month
+        fout_unaggregated = save_df(unaggregated, name + '_unaggreagted', dirout)
+        log.info( f"Batch {batch_id_formatted}: {name} - saved to {fout_unaggregated}" )
+    
+     # save removed rows unaggregated data
+    if save_removed:
+        removed = pd.concat(df_list_removed)
+        removed['partition_date'] = partition_date
+        removed['invoice_month'] = invoice_month
+        fout_removed = save_df(removed, name + "_removed_rows", dirout)
+        log.info( f"Batch {batch_id_formatted}: {name} - REMOVED ROWS saved to {fout_removed}" )
 
     return fout, billed, total_rows_processed
 
@@ -380,7 +382,8 @@ def remove_project_wt_multiple_billing_labels(df, exclude_projects):
     df_filt = df_filt.reset_index(drop=True)
     
     if len(exclude_projects) > 0:
-        log.warning(f"{len(exclude_projects)} projects with multiple billing / wbs labels found - exclude from the main report.\n")
+        log.warning(f'{len(exclude_projects)} projects with multiple \
+                      billing / wbs labels found - exclude from the main report.\n')
     
     return df_filt, df_exclude_aggr
 
@@ -535,7 +538,7 @@ def get_prev_runs(dirout, dirout_root, names):
     
     names_ = [re.sub('[^A-Za-z0-9]+', "_", n.lower()) for n in names]
     names_err_ = [re.sub('[^A-Za-z0-9]+', "_", n.lower()) + '_errors' for n in names]
-    ids = df['basename'].apply(lambda x: x.replace('.csv', '') in names_ or x.replace('.csv', '') in names_err_ )
+    ids = df['basename'].apply(lambda x: x.replace('.tsv', '') in names_ or x.replace('.tsv', '') in names_err_ )
     df = df[ids]
     df = df.reset_index(drop = True)
     
@@ -543,11 +546,12 @@ def get_prev_runs(dirout, dirout_root, names):
 
 def prepare_queiries(args, md):
     ''' Prepare a list of queries '''
-    
+
     t_name = f"{args.project_id}.{args.dataset_id}.{args.table_id}"
     
     # start
     if args.month == 1:
+        prev_month_last_day = get_prev_month_last_day(args.year-1, 12)
         start = f'{args.year-1}-12-{prev_month_last_day:02d}'
     else: 
         prev_month_last_day = get_prev_month_last_day(args.year, args.month - 1)
@@ -558,7 +562,7 @@ def prepare_queiries(args, md):
         end = f'{args.year+1}-{1:02d}-03'      
     else:
         end = f'{args.year}-{(args.month + 1):02d}-03'
-    
+
     # prepare queries
     if args.mode == 'full':
         dates = get_dates(start, end)
@@ -567,7 +571,7 @@ def prepare_queiries(args, md):
     else:
         queries = [get_query_billing_label(t_name, start, end, md['label'].iloc[i]) for i in range(md.shape[0])]
         names = [md.iloc[i]['description'] for i, q in enumerate(queries)]
-    
+        
     return queries, names
 
 def prepare_batches(args, queries, names, lookup, dirout):
@@ -582,7 +586,7 @@ def prepare_batches(args, queries, names, lookup, dirout):
     for i,q in enumerate(queries):
         if args.check_prev_runs and not args.dry_run:
             pattern = re.sub('[^A-Za-z0-9]+', "_", names[i].lower())
-            prev = lookup[lookup['basename'].apply(lambda x: pattern + '.csv' == x)]
+            prev = lookup[lookup['basename'].apply(lambda x: pattern + '.tsv' == x)]
             if not prev.empty:
                 fname = list(prev['path'])[0]
                 prev_runs.append(fname)
@@ -594,7 +598,12 @@ def prepare_batches(args, queries, names, lookup, dirout):
         log.info(f"[BQ] {names[i]} - bytes processed: {p} ({round(p * 1e-09, 4)} GB)")
         
         # get batches construct
-        batches.append((q, client.project, i, names[i], fetch_type, invoice_month, args.chunk_size, dirout))
+        batches.append((
+            q, client.project, i, names[i], fetch_type, 
+            invoice_month, args.chunk_size, dirout,
+            args.save_raw, 
+            args.save_removed
+        ))
         
         total_bytes_processed.append(p)
     
@@ -603,65 +612,140 @@ def prepare_batches(args, queries, names, lookup, dirout):
     else:
         reuse = []
         
-    log.info(f"In total {len(batches)} batches prepared for processing - found {len(reuse)} reports from previous runs to reuse.")
+    log.info(f'In total {len(batches)} batches prepared for processing - found {len(reuse)} reports from previous runs to reuse.\n')
     
     return batches, prev_runs, total_bytes_processed
+
+class BlankLinesHelpFormatter (argparse.RawTextHelpFormatter):
+    def _split_lines(self, text, width):
+        return super()._split_lines(text, width) + ['']
 
 def parse_args():
     ''' Parse arguments '''
 
     parser = argparse.ArgumentParser(
-        description=('Script prepares monthly billing report.'),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        description='Script prepares monthly billing report.',
+        usage='use "python %(prog)s --help" for more information',
+        formatter_class=BlankLinesHelpFormatter
     )
 
-    parser.add_argument('--p', '--project', dest='project_id', required=True,
-                        help='PROJECT ID in which BQ billing table is stored.')
-
-    parser.add_argument('-d', '--dataset', dest='dataset_id', required=True,
-                        help='BigQuery dataset name (e.g. fimm_billing_data).')
+    parser.add_argument('--p', '--project', 
+                        dest='project_id', 
+                        required=True,
+                        help= textwrap.dedent('''\
+                        PROJECT ID in which BQ billing table is stored.'''))
     
-    parser.add_argument('-t', '--table', dest='table_id', required=True,
-                        help='BigQuery table name (e.g. gcp_billing_export_v1_015819_A39FE2_F94565).')
+    parser.add_argument('-d', '--dataset', 
+                        dest='dataset_id', 
+                        required=True,
+                        help= textwrap.dedent('''\
+                        BigQuery dataset name (e.g. fimm_billing_data).'''))
+    
+    parser.add_argument('-t', '--table', 
+                        dest='table_id', 
+                        required=True,
+                        help= textwrap.dedent('''\
+                        BigQuery table name.'''))
         
-    parser.add_argument('-y', '--year', dest='year', required=True,type=int,
-                        help='Extract records for a given year.')
+    parser.add_argument('-y', '--year', 
+                        dest='year', 
+                        required=True,
+                        type=int,
+                        help= textwrap.dedent('''\
+                        Extract records for a given year.'''))
     
-    parser.add_argument('-m', '--month', dest='month', required=True, type=int,
-                        help='Extract records for a given month (number)')
-
-    parser.add_argument('-o', '--dirout', dest='dirout', required=False, 
+    parser.add_argument('-m', '--month', 
+                        dest='month', 
+                        required=True, 
+                        type=int,
+                        help= textwrap.dedent('''\
+                        Extract records for a given month number (1-12).'''))
+    
+    parser.add_argument('-o', '--dirout', 
+                        dest='dirout', 
+                        required=False, 
                         default=os.getcwd(),
-                        help="Path to output file for saving report - not required if running with `--dry-run True`. (default: current working directory)")
-    
-    parser.add_argument('-dry', '--dry-run', dest='dry_run', required=False,
-                        default=True, type=str2bool,
-                        help="Run queries in the DRY_RUN mode, i.e. no actual queries are executed. Used for estimating costs of sql queries")
-    
-    parser.add_argument('-mode', '--mode', required=True, 
-                        choices=['full', 'metadata_billing_label'], default='full',
-                        help='Choose the mode to run: full (extracts all available data from the BQ table for a given month) \
-                            or selected (extracts records for billing labels specified in the metadata file). Default: "full"')
-    
-    parser.add_argument('-md', '--metadata', required=True,
-                        help='Metadata file storing project labels and description.')
-    
-    parser.add_argument('-b', '--bucket', required=True, 
-                        help='Extract metadata from the given bucket omiting gs:// prefix.')
-    
-    parser.add_argument('-r', '--remove', dest='remove', required=False,
-                        default=False, type=str2bool,
-                        help="Remove temporary files that are used for creating a final report (e.g. extracted costs per day/billing label. " + \
-                            "These will be saved to invoice<YEARMONTH>_ts_<TIMESTAMP> under the dirout folder)")
+                        help= textwrap.dedent('''\
+                        Path to output file for saving report - not required if running with
+                        `--dry-run True`.'''))
 
-    parser.add_argument('-c', '--max-cpu', dest='max_cpu', required=False, 
-                        default=6, type=int, help="Max cpu to use.")
+    parser.add_argument('-dry', '--dry-run', 
+                        dest='dry_run', 
+                        required=False,
+                        default=True, 
+                        type=str2bool,
+                        help= textwrap.dedent('''\
+                        Run queries in the DRY_RUN mode, i.e. no actual queries are executed.
+                        Used for estimating costs of sql queries.'''))
+    
+    parser.add_argument('-mode', '--mode', 
+                        required=True, 
+                        choices=['full', 'metadata_billing_label'], 
+                        default='full',
+                        help= textwrap.dedent('''\
+                        Choose the mode to run: full (extracts all available data from the BQ
+                        table  for a given month)  or selected (extracts  records for billing 
+                        labels specified in the metadata file).'''))
+    
+    parser.add_argument('-md', '--metadata', 
+                        required=True,
+                        help= textwrap.dedent('''\
+                        Metadata file storing project labels and description.'''))
 
-    parser.add_argument('-n', '--chunk-size', dest='chunk_size', required=False, default=10000, type=int, 
-                        help="When the table is too large - extract data in chuncks of this size.")
+    parser.add_argument('-b', '--bucket', 
+                        required=True, 
+                        help= textwrap.dedent('''\
+                        Extract metadata from the given bucket omiting gs:// prefix.'''))
 
-    parser.add_argument('-check', '--check-prev-runs', dest='check_prev_runs', required=False,
-                        default=False, type=str2bool, help="Check previous runs")
+    parser.add_argument('-r', '--remove', 
+                        dest='remove', 
+                        required=False,
+                        default=False, 
+                        type=str2bool,
+                        help= textwrap.dedent('''\
+                        Remove temporary files that are used for creating a final report (e.g.
+                        extracted costs per day / billing label. These will be saved to a file
+                        invoice<YEARMONTH>_ts_<TIMESTAMP> under the dirout folder.'''))
+
+    parser.add_argument('-c', '--max-cpu', 
+                        dest='max_cpu', 
+                        required=False, 
+                        default=6, 
+                        type=int, 
+                        help= textwrap.dedent('''\
+                        Max CPUs to use.'''))
+
+    parser.add_argument('-n', '--chunk-size', 
+                        dest='chunk_size',
+                        required=False, 
+                        default=10000, 
+                        type=int, 
+                        help= textwrap.dedent('''\
+                        When the table is too large - extract data in chuncks of this size.'''))
+
+    parser.add_argument('-check', '--check-prev-runs', 
+                        dest='check_prev_runs', 
+                        required=False,
+                        default=False, type=str2bool, 
+                        help= textwrap.dedent('''\
+                        Check previous runs - will be reused if available.'''))
+    
+    parser.add_argument('-sa', '--save-raw', 
+                        dest='save_raw', 
+                        required=False,
+                        default=False, 
+                        type=str2bool, 
+                        help= textwrap.dedent('''\
+                        Save unprocessed, unaggregated rows extracted directly from the BQ.'''))
+    
+    parser.add_argument('-se', '--save-removed', 
+                        dest='save_removed', 
+                        required=False,
+                        default=False, 
+                        type=str2bool, 
+                        help= textwrap.dedent('''\
+                        Save rows that are omitted from final report due to umbigous billing
+                        labels throughout the month.'''))
 
     args = parser.parse_args()
     return args
@@ -696,13 +780,12 @@ if __name__ == '__main__':
     if not args.dry_run:
 
         summarize_bq_costs_info(batches_list[2], 'processed')
-
+        
         cpus = min(args.max_cpu, multiprocessing.cpu_count())
         log.info(f"Using {cpus} CPUs.")
+
         with Pool(processes=cpus) as pool:
             reports, total_billed, total_rows =  zip(*pool.map(multiproc_wrapper, batches_list[0]))
-
-            # filter out nones
             reports = [f for f in reports if f is not None]
 
             # combine files from previous and current runs
@@ -727,7 +810,7 @@ if __name__ == '__main__':
             remove_temp_files(dirout)
     
     print('\n' + ('').center(80, '='))
-    log.info('SCANNING IS COMPLETED')
+    log.info('SCANNING IS COMPLETED\n')
 
     log.info(f"(BQ) Total rows processed {sum(total_rows)}")
     summarize_bq_costs_info(batches_list[2], 'processed')
