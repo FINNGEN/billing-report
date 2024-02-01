@@ -118,7 +118,7 @@ def get_month_last_day(year, month):
     cal = calendar.monthcalendar(year, month)
     days = [d for w in cal for d in w  if d != 0]
     days.reverse()
-    end = days[0]
+    end = days[1]
     
     return end
 
@@ -172,17 +172,21 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
-def get_dates(year, month):
+
+def get_dates(start, end):
     '''Get dates in a month with 1 day overlap from prev/next months'''
     
-    start_day = get_month_last_day(year, month - 1)
-    start_dt = date(year, month-1, start_day)
-    end_dt = date(year, month+1, 1)
     delta = timedelta(days=1)
     
-    # store the dates between two dates in a list
-    dates = []
+    s = datetime.datetime.strptime(start, '%Y-%m-%d')
+    e = datetime.datetime.strptime(end, '%Y-%m-%d')
+    start_dt = date(s.year, s.month, s.day)
+    end_dt = date(e.year, e.month, e.day)
     
+    log.info(f"Start date %Y-%m-%d: {start_dt}, end date %Y-%m-%d: {end_dt}")    
+    
+    # store dates between the two dates in a list
+    dates = []
     while start_dt <= end_dt:
         # add current date to list by converting  it to iso format
         dates.append(start_dt.isoformat())
@@ -190,7 +194,29 @@ def get_dates(year, month):
         # increment start date by timedelta
         start_dt += delta
     
+    log.info(f"Total dates {len(dates)}")    
+    
     return dates
+
+# def get_dates(year, month):
+#     '''Get dates in a month with 1 day overlap from prev/next months'''
+    
+#     start_day = get_month_last_day(year, month - 1)
+#     start_dt = date(year, month-1, start_day)
+#     end_dt = date(year, month+1, 1)
+#     delta = timedelta(days=1)
+    
+#     # store the dates between two dates in a list
+#     dates = []
+    
+#     while start_dt <= end_dt:
+#         # add current date to list by converting  it to iso format
+#         dates.append(start_dt.isoformat())
+        
+#         # increment start date by timedelta
+#         start_dt += delta
+    
+#     return dates
 
 def multiproc_wrapper(args):
     ''' Multiproc wrapper function '''
@@ -254,7 +280,7 @@ def process_batch(q, project_id, batch_id, name, fetch_type, invoice_month, chun
     log.info( f"Batch {batch_id_formatted}: {name} - data unnested and aggregated" )
     combined = pd.DataFrame(flatten(df_list)) 
     e = datetime.datetime.now()
-    log.info( f"Batch {batch_id_formatted}: {name} - proccessing finished in {round((e - s).seconds / 60, 2)} mins" )
+    log.info( f"Batch {batch_id_formatted}: {name} - processing finished in {round((e - s).seconds / 60, 2)} mins" )
     
     if combined.empty:
         log.info( f"Batch {batch_id_formatted}: {name} - no entries for a given invoice month were found" )
@@ -508,23 +534,54 @@ def get_prev_runs(dirout, dirout_root, names):
     
     return df
 
+
 def prepare_queiries(args, md):
     ''' Prepare a list of queries '''
     
     t_name = f"{args.project_id}.{args.dataset_id}.{args.table_id}"
     
+    # start
+    if args.month == 1:
+        start = f'{args.year-1}-12-{prev_month_last_day:02d}'
+    else: 
+        prev_month_last_day = get_month_last_day(args.year, args.month - 1)
+        start = f'{args.year}-{(args.month - 1):02d}-{prev_month_last_day:02d}'
+    
+    # end
+    if args.month == 12:
+        end = f'{args.year+1}-{1:02d}-03'      
+    else:
+        end = f'{args.year}-{(args.month + 1):02d}-03'
+    
+    # prepare queries
     if args.mode == 'full':
-        dates = get_dates(args.year, args.month)
+        dates = get_dates(start, end)
         queries = [get_query(t_name, d) for d in dates]
         names = [dates[i] for i, q in enumerate(queries)]
     else:
-        prev_month_last_day = get_month_last_day(args.year, args.month - 1)
-        start = f'{args.year}-{(args.month - 1):02d}-{prev_month_last_day:02d}'
-        end = f'{args.year}-{(args.month + 1):02d}-01'        
         queries = [get_query_billing_label(t_name, start, end, md['label'].iloc[i]) for i in range(md.shape[0])]
         names = [md.iloc[i]['description'] for i, q in enumerate(queries)]
     
     return queries, names
+
+
+# def prepare_queiries(args, md):
+#     ''' Prepare a list of queries '''
+    
+#     t_name = f"{args.project_id}.{args.dataset_id}.{args.table_id}"
+    
+#     if args.mode == 'full':
+#         dates = get_dates(args.year, args.month)
+#         queries = [get_query(t_name, d) for d in dates]
+#         names = [dates[i] for i, q in enumerate(queries)]
+#     else:
+#         prev_month_last_day = get_month_last_day(args.year, args.month - 1)
+#         start = f'{args.year}-{(args.month - 1):02d}-{prev_month_last_day:02d}'
+#         end = f'{args.year}-{(args.month + 1):02d}-01'        
+#         queries = [get_query_billing_label(t_name, start, end, md['label'].iloc[i]) for i in range(md.shape[0])]
+#         names = [md.iloc[i]['description'] for i, q in enumerate(queries)]
+    
+#     return queries, names
 
 def prepare_batches(args, queries, names, lookup, dirout):
     '''Prepare batches to be processed in parallel'''
