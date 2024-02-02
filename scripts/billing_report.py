@@ -583,29 +583,30 @@ def prepare_batches(args, queries, names, lookup, dirout):
     total_bytes_processed = []
     
     for i,q in enumerate(queries):
-        if args.check_prev_runs and not args.dry_run:
+        
+        if args.check_prev_runs:
             pattern = re.sub('[^A-Za-z0-9]+', "_", names[i].lower())
             prev = lookup[lookup['basename'].apply(lambda x: pattern + '.tsv' == x)]
             if not prev.empty:
                 fname = list(prev['path'])[0]
                 prev_runs.append(fname)
                 log.info(f'Found previously saved result for {names[i]} - use it {fname}')
-            else:
+        else:
 
-                # add fresh query if the prev run is not found
-                r = run_query(q, client, dry_run = True)
-                p = 0 if r.total_bytes_processed is None else  r.total_bytes_processed
-                log.info(f"[BQ] {names[i]} - bytes processed: {p} ({round(p * 1e-09, 4)} GB)")
-                
-                # get batches construct
-                batches.append((
-                    q, client.project, i, names[i], fetch_type, 
-                    invoice_month, args.chunk_size, dirout,
-                    args.save_raw, 
-                    args.save_removed
-                ))
-                
-                total_bytes_processed.append(p)
+            # add fresh query if the prev run is not found
+            r = run_query(q, client, dry_run = args.dry_run)
+            p = 0 if r.total_bytes_processed is None else  r.total_bytes_processed
+            log.info(f"[BQ] {names[i]} - bytes processed: {p} ({round(p * 1e-09, 4)} GB)")
+
+            # get batches construct
+            batches.append((
+                q, client.project, i, names[i], fetch_type, 
+                invoice_month, args.chunk_size, dirout,
+                args.save_raw, 
+                args.save_removed
+            ))
+
+            total_bytes_processed.append(p)
     
     if args.check_prev_runs:
         reuse = [f for f in set(list(lookup['basename']))]
