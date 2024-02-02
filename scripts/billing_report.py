@@ -200,7 +200,6 @@ def get_dates(start, end):
 
 def multiproc_wrapper(args):
     ''' Multiproc wrapper function '''
-    
     try:
         res = process_batch(*args)
     except Exception as e:
@@ -591,21 +590,22 @@ def prepare_batches(args, queries, names, lookup, dirout):
                 fname = list(prev['path'])[0]
                 prev_runs.append(fname)
                 log.info(f'Found previously saved result for {names[i]} - use it {fname}')
-            continue
-        
-        r = run_query(q, client, dry_run = True)
-        p = 0 if r.total_bytes_processed is None else  r.total_bytes_processed
-        log.info(f"[BQ] {names[i]} - bytes processed: {p} ({round(p * 1e-09, 4)} GB)")
-        
-        # get batches construct
-        batches.append((
-            q, client.project, i, names[i], fetch_type, 
-            invoice_month, args.chunk_size, dirout,
-            args.save_raw, 
-            args.save_removed
-        ))
-        
-        total_bytes_processed.append(p)
+            else:
+
+                # add fresh query if the prev run is not found
+                r = run_query(q, client, dry_run = True)
+                p = 0 if r.total_bytes_processed is None else  r.total_bytes_processed
+                log.info(f"[BQ] {names[i]} - bytes processed: {p} ({round(p * 1e-09, 4)} GB)")
+                
+                # get batches construct
+                batches.append((
+                    q, client.project, i, names[i], fetch_type, 
+                    invoice_month, args.chunk_size, dirout,
+                    args.save_raw, 
+                    args.save_removed
+                ))
+                
+                total_bytes_processed.append(p)
     
     if args.check_prev_runs:
         reuse = [f for f in set(list(lookup['basename']))]
@@ -785,10 +785,14 @@ if __name__ == '__main__':
         log.info(f"Using {cpus} CPUs.")
 
         with Pool(processes=cpus) as pool:
-            reports, total_billed, total_rows =  zip(*pool.map(multiproc_wrapper, batches_list[0]))
-            reports = [f for f in reports if f is not None]
+            try:
+                reports, total_billed, total_rows =  zip(*pool.map(multiproc_wrapper, batches_list[0]))
+            except Exception as e:
+                log.error(e)
+                reports, total_billed, total_rows = ([], [], [])
 
             # combine files from previous and current runs
+            reports = [f for f in reports if f is not None]
             reports_all = reports + batches_list[1]
         
         # prepare finale repors
